@@ -1,0 +1,68 @@
+@import "tailwindcss";
+
+/* Vercel-style dark design system */
+@theme {
+  --color-bg: #000000;
+  --color-panel: #0a0a0a;
+  --color-card: #0c0c0c;
+  --color-elevated: #161616;
+  --color-line: #242424;
+  --color-line-strong: #343434;
+  --color-fg: #ededed;
+  --color-muted: #a1a1a1;
+  --color-faint: #6e6e6e;
+  --color-accent: #0072f5;
+  --color-success: #2bd576;
+  --color-warning: #f5a623;
+  --color-danger: #ff5c5c;
+  --color-running: #3b9eff;
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html, body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+}
+
+* { border-color: var(--color-line); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 8px; border: 2px solid var(--color-bg); }
+::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+
+@layer utilities {
+  .card { background: var(--color-card); border: 1px solid var(--color-line); border-radius: 12px; }
+  .card-hover { transition: all .12s ease; }
+  .card-hover:hover { border-color: var(--color-line-strong); background: #0f0f0f; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; justify-content: center;
+    border-radius: 8px; font-size: 13px; font-weight: 500; line-height: 1;
+    padding: 0 14px; height: 36px; transition: all .12s ease; cursor: pointer;
+    border: 1px solid transparent; white-space: nowrap; user-select: none;
+  }
+  .btn-sm { height: 30px; padding: 0 10px; font-size: 12px; border-radius: 7px; }
+  .btn-primary { background: var(--color-fg); color: #000; }
+  .btn-primary:hover { background: #fff; }
+  .btn-secondary { background: transparent; color: var(--color-fg); border-color: var(--color-line-strong); }
+  .btn-secondary:hover { background: #1a1a1a; border-color: #4a4a4a; }
+  .btn-danger { background: transparent; color: var(--color-danger); border-color: #4a2424; }
+  .btn-danger:hover { background: #2a1414; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .input {
+    background: #0a0a0a; border: 1px solid var(--color-line-strong); border-radius: 8px;
+    height: 38px; padding: 0 12px; font-size: 13px; color: var(--color-fg); width: 100%;
+  }
+  .input:focus { border-color: var(--color-accent); }
+  .label { font-size: 12px; color: var(--color-muted); font-weight: 500; }
+  .mono { font-family: var(--font-mono); }
+}
+
+:root {
+  --font-geist-sans: ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-geist-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+html, body, #root { height: 100%; margin: 0; }
+body { font-family: var(--font-geist-sans); -webkit-font-smoothing: antialiased; }

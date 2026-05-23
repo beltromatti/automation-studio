@@ -1,0 +1,40 @@
+appId: it.noesisai.automation-studio
+productName: Automation Studio
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+# Shipped alongside the app (Contents/Resources/{backend,chromium} on macOS):
+#  - backend  = the frozen Python backend (orchestrator + humanbrowser + automations)
+#  - chromium = bundled patchright Chromium, used when no system Chrome is present
+extraResources:
+  - from: resources/backend
+    to: backend
+  - from: resources/chromium
+    to: chromium
+asar: true
+# the frozen backend must NOT be packed into asar (it's a real executable tree)
+asarUnpack: []
+mac:
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  category: public.app-category.developer-tools
+  # Signing/notarization are driven by env (CSC_LINK, APPLE_ID, …) via scripts/build.mjs:
+  # signed when those secrets are present, ad-hoc otherwise. Hardened runtime for notarization.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+win:
+  target: [nsis]
+  artifactName: "${productName}-${version}.${ext}"
+linux:
+  target: [AppImage]
+  category: Development
+  artifactName: "${productName}-${version}.${ext}"

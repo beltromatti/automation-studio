@@ -1,0 +1,27 @@
+[project]
+name = "automation-backend"
+version = "0.1.0"
+description = "Local backend for Automation Studio: humanbrowser engine + automations + orchestrator API"
+requires-python = ">=3.11"
+dependencies = [
+    "patchright>=1.55",
+    "aiohttp>=3.9",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "platformdirs>=4.0",
+    "psutil>=5.9",
+]
+
+[project.scripts]
+hb = "humanbrowser.cli:main"
+automation-backend = "orchestrator.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["humanbrowser", "automations", "orchestrator"]
+
+[tool.setuptools.package-data]
+humanbrowser = ["*.js"]

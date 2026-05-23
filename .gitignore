@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+backend/build/
+backend/dist/
+
+# Runtime data (per-user; never commit profiles/sessions/results)
+dev-data/
+profiles/
+artifacts/
+.console-data/
+
+# Frontend / Electron build artifacts
+frontend/node_modules/
+frontend/out/
+frontend/release/
+frontend/resources/backend/
+frontend/resources/chromium/
+
+# misc
+report.txt
+*.csv
+.DS_Store
+*.log

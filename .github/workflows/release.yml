@@ -1,0 +1,129 @@
+name: Release
+
+# Push a semver tag (e.g. v1.0.0) on main → build all targets in parallel and
+# publish a GitHub Release. The version is inferred from the tag and injected
+# into the app, packages and installers.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build ${{ matrix.target }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14      # Apple Silicon
+            target: mac
+            arch: arm64
+          - os: macos-13      # Intel (native hosted runner)
+            target: mac
+            arch: x64
+          - os: windows-latest
+            target: win
+            arch: x64
+          - os: ubuntu-latest
+            target: linux
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Inject version everywhere
+        shell: bash
+        run: |
+          cd frontend && npm version "$VERSION" --no-git-tag-version --allow-same-version
+          cd ..
+          python - "$VERSION" <<'PY'
+          import re, sys, pathlib
+          v = sys.argv[1]
+          p = pathlib.Path("backend/pyproject.toml")
+          p.write_text(re.sub(r'(?m)^version = ".*"$', f'version = "{v}"', p.read_text()))
+          PY
+
+      - name: Install backend + PyInstaller
+        shell: bash
+        run: |
+          python -m pip install -U pip
+          pip install ./backend pyinstaller
+
+      - name: Freeze backend (PyInstaller onedir)
+        shell: bash
+        working-directory: backend
+        run: pyinstaller --noconfirm automation-backend.spec
+
+      - name: Bundle Chromium for this target
+        shell: bash
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/frontend/resources/chromium
+        run: python -m patchright install chromium
+
+      - name: Install frontend deps
+        shell: bash
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build & package
+        shell: bash
+        working-directory: frontend
+        env:
+          # macOS signing + notarization (set these as repo secrets to sign for real)
+          CSC_LINK: ${{ matrix.target == 'mac' && secrets.MAC_CSC_LINK || (matrix.target == 'win' && secrets.WIN_CSC_LINK || '') }}
+          CSC_KEY_PASSWORD: ${{ matrix.target == 'mac' && secrets.MAC_CSC_KEY_PASSWORD || (matrix.target == 'win' && secrets.WIN_CSC_KEY_PASSWORD || '') }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node scripts/build.mjs ${{ matrix.target }} ${{ matrix.arch }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-${{ matrix.arch }}
+          path: |
+            frontend/release/*.dmg
+            frontend/release/*.zip
+            frontend/release/*.exe
+            frontend/release/*.AppImage
+            frontend/release/*.blockmap
+            frontend/release/latest*.yml
+          if-no-files-found: warn
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: dist/*
