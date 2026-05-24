@@ -35,6 +35,12 @@ jobs:
           - os: ubuntu-latest
             target: linux
             arch: x64
+    env:
+      # secrets exposed as env so they're usable in step `if:` conditions
+      MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -86,22 +92,22 @@ jobs:
 
       # --- signing setup (free-basic by default; real certs via secrets) ---
       - name: Prepare macOS signing
-        if: matrix.target == 'mac' && secrets.MAC_CSC_LINK != ''
+        if: matrix.target == 'mac' && env.MAC_CSC_LINK != ''
         shell: bash
         run: |
-          echo "CSC_LINK=${{ secrets.MAC_CSC_LINK }}" >> "$GITHUB_ENV"
-          echo "CSC_KEY_PASSWORD=${{ secrets.MAC_CSC_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "CSC_LINK=$MAC_CSC_LINK" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=$MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
         # (no secret → build.mjs ad-hoc signs: free, runs locally, "right-click → Open" if downloaded)
 
       - name: Prepare Windows signing (real cert)
-        if: matrix.target == 'win' && secrets.WIN_CSC_LINK != ''
+        if: matrix.target == 'win' && env.WIN_CSC_LINK != ''
         shell: bash
         run: |
-          echo "CSC_LINK=${{ secrets.WIN_CSC_LINK }}" >> "$GITHUB_ENV"
-          echo "CSC_KEY_PASSWORD=${{ secrets.WIN_CSC_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "CSC_LINK=$WIN_CSC_LINK" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=$WIN_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Prepare Windows signing (free self-signed)
-        if: matrix.target == 'win' && secrets.WIN_CSC_LINK == ''
+        if: matrix.target == 'win' && env.WIN_CSC_LINK == ''
         shell: pwsh
         run: |
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Automation Studio (self-signed)" -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable
