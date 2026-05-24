@@ -5,6 +5,7 @@ import Overview from "@/pages/Overview";
 import WorkflowPage from "@/pages/WorkflowPage";
 import RunsPage from "@/pages/RunsPage";
 import RunDetail from "@/pages/RunDetail";
+import ProfilesPage from "@/pages/ProfilesPage";
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
             <Route path="/workflows/:id" element={<WorkflowPage />} />
             <Route path="/runs" element={<RunsPage />} />
             <Route path="/runs/:id" element={<RunDetail />} />
+            <Route path="/profiles" element={<ProfilesPage />} />
           </Routes>
         </main>
       </div>

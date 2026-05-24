@@ -18,6 +18,12 @@ export function RunRow({ run }: { run: Run }) {
           {run.rows != null && ` · ${run.rows} rows`}
         </div>
       </div>
+      {run.profileName && run.profileId !== "temporary" && (
+        <span className="hidden sm:inline-flex items-center gap-1.5 text-[11px] text-muted shrink-0">
+          <span className="w-2 h-2 rounded-full" style={{ background: "#0072f5" }} />
+          {run.profileName}
+        </span>
+      )}
       {run.progress && (run.status === "running" || run.status === "starting") && (
         <div className="text-[11px] mono text-faint shrink-0">
           {run.progress.collected}/{run.progress.total}

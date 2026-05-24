@@ -6,6 +6,7 @@ import { useRuns } from "./RunsProvider";
 const NAV = [
   { href: "/", label: "Workflows", icon: "layers" },
   { href: "/runs", label: "Runs", icon: "terminal" },
+  { href: "/profiles", label: "Profiles", icon: "user" },
 ];
 
 export function Sidebar() {

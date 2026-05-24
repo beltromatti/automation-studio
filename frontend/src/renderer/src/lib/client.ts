@@ -21,6 +21,13 @@ export async function jpost<T>(url: string, body?: unknown): Promise<T> {
   return data;
 }
 
+export async function jdel<T>(url: string): Promise<T> {
+  const r = await fetch(BASE + url, { method: "DELETE", cache: "no-store" });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
 export function downloadUrl(path: string): string {
   return BASE + path;
 }
@@ -40,4 +47,16 @@ export function duration(start?: number, end?: number): string {
   const s = Math.floor((end ?? Date.now() / 1000) - start);
   if (s < 60) return `${s}s`;
   return `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+export function formatBytes(n?: number): string {
+  if (!n) return "empty";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < u.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
 }

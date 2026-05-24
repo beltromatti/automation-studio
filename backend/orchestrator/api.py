@@ -53,7 +53,8 @@ def create_app() -> FastAPI:
     async def create_run(body: dict = Body(...)):
         mgr = get_manager()
         try:
-            run = mgr.create(body["workflowId"], body.get("params") or {}, bool(body.get("watch")))
+            run = mgr.create(body["workflowId"], body.get("params") or {}, bool(body.get("watch")),
+                             body.get("profileId") or "temporary")
             return {"run": mgr.get(run.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
@@ -103,5 +104,43 @@ def create_app() -> FastAPI:
     @app.post("/api/settings")
     async def set_settings(body: dict = Body(...)):
         return get_manager().set_settings(body)
+
+    # ---------------------------------------------------------------- profiles
+    @app.get("/api/profiles")
+    async def list_profiles():
+        from . import profiles
+        open_ids = set(get_manager().open_session_ids())
+        items = [{**p, "open": p["id"] in open_ids,
+                  "openPort": get_manager().sessions.get(p["id"], {}).get("port")}
+                 for p in profiles.list_profiles()]
+        return {"profiles": items}
+
+    @app.post("/api/profiles")
+    async def create_profile(body: dict = Body(...)):
+        from . import profiles
+        return {"profile": profiles.create(body.get("name", "Profile"))}
+
+    @app.post("/api/profiles/{pid}/rename")
+    async def rename_profile(pid: str, body: dict = Body(...)):
+        from . import profiles
+        p = profiles.rename(pid, body.get("name", ""))
+        return {"profile": p} if p else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.delete("/api/profiles/{pid}")
+    async def delete_profile(pid: str):
+        from . import profiles
+        # closing any open session first so its files aren't locked
+        await get_manager().close_profile_session(pid)
+        ok = profiles.delete(pid)
+        return {"ok": ok} if ok else JSONResponse({"error": "cannot delete (default or not found)"}, status_code=400)
+
+    @app.post("/api/profiles/{pid}/open")
+    async def open_profile(pid: str):
+        res = await get_manager().open_profile_session(pid)
+        return JSONResponse(res, status_code=200 if res.get("ok") else 400)
+
+    @app.post("/api/profiles/{pid}/close")
+    async def close_profile(pid: str):
+        return await get_manager().close_profile_session(pid)
 
     return app

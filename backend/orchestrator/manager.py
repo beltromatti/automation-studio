@@ -77,6 +77,8 @@ class Run:
     watch: bool
     createdAt: float
     profileKey: str
+    profileId: str = "temporary"
+    profileName: str = "Temporary"
     profileDir: str = ""
     browserOpen: bool = False
     startedAt: float | None = None
@@ -97,6 +99,7 @@ class RunManager:
         self.procs: dict[str, dict[str, Any]] = {}  # id -> {server, work} asyncio procs
         self.logs: dict[str, list[str]] = {}
         self.flags: dict[str, dict] = {}  # id -> {canceled, takingControl}
+        self.sessions: dict[str, dict] = {}  # profileId -> {proc, port} (manual open sessions)
         self.settings = {"maxConcurrency": 1}
         self._http: aiohttp.ClientSession | None = None
         self._reaper_task: asyncio.Task | None = None
@@ -129,7 +132,59 @@ class RunManager:
                 proc = p.get(key)
                 if proc and proc.pid:
                     kill_tree(proc.pid)
+        for s in self.sessions.values():
+            if s.get("proc"):
+                kill_tree(s["proc"].pid)
         self.reap_strays(startup=True)
+
+    # ------------------------------------------------------------------ profile sessions
+    async def open_profile_session(self, pid: str) -> dict:
+        """Open a headed browser on a profile's MASTER dir (no workflow) so the
+        user can log in / set things up; changes persist to the profile."""
+        from . import profiles
+        prof = profiles.get(pid)
+        if not prof:
+            return {"ok": False, "error": "unknown profile"}
+        if pid in self.sessions:
+            return {"ok": True, "port": self.sessions[pid]["port"]}
+        port = self._alloc_port()
+        master = str(profiles.master_dir(pid))
+        Path(master).mkdir(parents=True, exist_ok=True)
+        cmd = _self_base() + ["control-server", "--port", str(port), "--profile", master]
+        proc = await self._spawn(cmd)
+        self.sessions[pid] = {"proc": proc, "port": port}
+        asyncio.create_task(self._session_watch(pid, proc))
+        if not await self._wait_ready(port, 25):
+            kill_tree(proc.pid)
+            self.sessions.pop(pid, None)
+            return {"ok": False, "error": "browser failed to start"}
+        try:
+            await self._server_post(port, "/goto", {"url": "about:blank"})
+        except Exception:
+            pass
+        profiles.touch(pid)
+        return {"ok": True, "port": port}
+
+    async def _session_watch(self, pid: str, proc) -> None:
+        try:
+            await proc.wait()
+        finally:
+            self.sessions.pop(pid, None)
+
+    async def close_profile_session(self, pid: str) -> dict:
+        s = self.sessions.get(pid)
+        if not s:
+            return {"ok": True}
+        try:
+            await self._server_post(s["port"], "/shutdown")
+        except Exception:
+            pass
+        kill_tree(s["proc"].pid)
+        self.sessions.pop(pid, None)
+        return {"ok": True}
+
+    def open_session_ids(self) -> list[str]:
+        return list(self.sessions.keys())
 
     # ------------------------------------------------------------------ reaping
     def reap_strays(self, startup: bool) -> None:
@@ -165,7 +220,7 @@ class RunManager:
         try:
             if RUNS_INDEX.exists():
                 for d in json.loads(RUNS_INDEX.read_text()):
-                    fields = {k: d.get(k) for k in Run.__dataclass_fields__}
+                    fields = {k: d[k] for k in Run.__dataclass_fields__ if k in d}
                     r = Run(**fields)
                     if r.status not in TERMINAL:
                         r.status = "failed"
@@ -223,18 +278,27 @@ class RunManager:
         self.schedule()
         return self.settings
 
-    def create(self, workflow_id: str, params: dict, watch: bool = False) -> Run:
+    def create(self, workflow_id: str, params: dict, watch: bool = False,
+               profile_id: str = "temporary") -> Run:
         from .registry import get_workflow
+        from . import profiles
         wf = get_workflow(workflow_id)
         if not wf:
             raise ValueError(f"unknown workflow: {workflow_id}")
         for p in wf.params:
             if p.required and not params.get(p.name):
                 raise ValueError(f"missing required parameter: {p.label}")
+        if profile_id and profile_id != "temporary":
+            prof = profiles.get(profile_id)
+            if not prof:
+                raise ValueError(f"unknown profile: {profile_id}")
+            profile_name = prof["name"]
+        else:
+            profile_id, profile_name = "temporary", "Temporary"
         rid = uuid.uuid4().hex[:8]
-        profile_key = f"shared:{wf.profile_name}" if wf.profile == "shared" else f"eph:{rid}"
         run = Run(id=rid, workflowId=workflow_id, workflowName=wf.name, params=params,
-                  status="queued", watch=bool(watch), createdAt=time.time(), profileKey=profile_key)
+                  status="queued", watch=bool(watch), createdAt=time.time(),
+                  profileKey=profile_id, profileId=profile_id, profileName=profile_name)
         self.runs[rid] = run
         (RUNS_DIR / rid).mkdir(parents=True, exist_ok=True)
         self._save()
@@ -302,21 +366,33 @@ class RunManager:
 
     # ------------------------------------------------------------------ scheduling
     def schedule(self) -> None:
+        # Each run uses its own cloned profile dir, so runs never contend for a
+        # profile lock — they can all run in parallel up to maxConcurrency,
+        # whatever profile they use (same or different).
         active = [r for r in self.runs.values() if r.status in ACTIVE]
-        held = {r.profileKey for r in active}
         running = sum(1 for r in active if r.status in ("running", "starting"))
         slots = self.settings["maxConcurrency"] - running
         if slots <= 0:
             return
         queued = sorted((r for r in self.runs.values() if r.status == "queued"), key=lambda r: r.createdAt)
-        for run in queued:
-            if slots <= 0:
-                break
-            if run.profileKey in held:
-                continue
-            held.add(run.profileKey)
-            slots -= 1
-            asyncio.create_task(self.start_run(run))
+        for run in queued[:slots]:
+            asyncio.create_task(self._start_run_guarded(run))
+
+    async def _start_run_guarded(self, run: Run) -> None:
+        try:
+            await self.start_run(run)
+        except Exception as e:
+            run.status = "failed"
+            run.error = f"failed to start: {e}"
+            run.finishedAt = time.time()
+            run.browserOpen = False
+            self._log(run.id, f"[backend] start error: {e}")
+            try:
+                await self.shutdown_server(run)
+            except Exception:
+                pass
+            self._save()
+            self.schedule()
 
     def _alloc_port(self) -> int:
         used = {r.serverPort for r in self.runs.values() if r.serverPort}
@@ -328,15 +404,20 @@ class RunManager:
     # ------------------------------------------------------------------ run lifecycle
     async def start_run(self, run: Run) -> None:
         from .registry import get_workflow
+        from . import profiles
         wf = get_workflow(run.workflowId)
         run.status = "starting"
         run.startedAt = time.time()
         port = self._alloc_port()
         run.serverPort = port
-        run.profileDir = str(PROFILES_DIR / wf.profile_name) if wf.profile == "shared" else str(EPHEMERAL_DIR / run.id)
+        # Give the run an isolated, parallel-safe profile dir: a fast CLONE of the
+        # chosen profile (login preserved) or a fresh empty one for "Temporary".
+        if run.profileId and run.profileId != "temporary":
+            run.profileDir = profiles.clone_for_run(run.profileId, run.id)
+            profiles.touch(run.profileId)
+        else:
+            run.profileDir = profiles.fresh_for_run(run.id)
         (RUNS_DIR / run.id).mkdir(parents=True, exist_ok=True)
-        if wf.profile == "ephemeral":
-            Path(run.profileDir).mkdir(parents=True, exist_ok=True)
         self._save()
 
         # 1) control server (the browser session)

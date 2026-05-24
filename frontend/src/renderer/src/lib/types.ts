@@ -58,10 +58,25 @@ export interface Run {
   error?: string;
   serverPort?: number;
   profileKey: string;
+  profileId: string; // "temporary" or a profile id
+  profileName: string; // display name ("Temporary" or the profile's name)
   profileDir: string;
   browserOpen: boolean; // control server / window still alive
 }
 
 export interface Settings {
   maxConcurrency: number;
+}
+
+// A browser profile: a self-contained, persistent browser environment (cookies,
+// logins, history, storage). Runs clone it so many can run in parallel.
+export interface Profile {
+  id: string;
+  name: string;
+  color: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  sizeBytes: number;
+  open: boolean; // a manual login/setup window is currently open on it
+  openPort: number | null;
 }

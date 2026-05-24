@@ -61,6 +61,13 @@ export default function RunDetail() {
           <div className="flex items-center gap-3 mb-4 flex-wrap">
             <StatusPill status={run.status} />
             <span className="text-[14px] font-semibold">{run.workflowName}</span>
+            {run.profileName && (
+              <span className="inline-flex items-center gap-1.5 text-[11.5px] px-2 py-0.5 rounded-md" style={{ background: "#161616", border: "1px solid var(--color-line)" }}>
+                <Icon name="user" size={12} />
+                {run.profileName}
+                {run.profileId === "temporary" && <span className="text-faint">· throwaway</span>}
+              </span>
+            )}
             <span className="text-[12px] text-faint mono ml-auto">
               {active ? `running ${duration(run.startedAt)}` : `${duration(run.startedAt, run.finishedAt)} · ${timeAgo(run.createdAt)}`}
             </span>

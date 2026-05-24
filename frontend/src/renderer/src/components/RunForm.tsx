@@ -1,9 +1,9 @@
 
-import { useNavigate } from "react-router-dom";
-import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { Icon } from "./Icon";
-import { jpost } from "@/lib/client";
-import type { PublicWorkflow, Run } from "@/lib/types";
+import { jget, jpost } from "@/lib/client";
+import type { Profile, PublicWorkflow, Run } from "@/lib/types";
 
 export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const navigate = useNavigate();
@@ -15,12 +15,31 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const [watch, setWatch] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  // Workflows that use a login default to the profile they were built around (id
+  // "default" today); everything else starts on a throwaway "Temporary" profile.
+  const [profileId, setProfileId] = useState<string>(workflow.needsAuth ? "default" : "temporary");
+
+  useEffect(() => {
+    jget<{ profiles: Profile[] }>("/api/profiles")
+      .then((d) => {
+        setProfiles(d.profiles);
+        setProfileId((cur) =>
+          cur === "temporary" || d.profiles.some((p) => p.id === cur)
+            ? cur
+            : d.profiles[0]?.id ?? "temporary",
+        );
+      })
+      .catch(() => {});
+  }, []);
+
+  const selected = profiles.find((p) => p.id === profileId);
 
   const submit = async () => {
     setBusy(true);
     setError("");
     try {
-      const { run } = await jpost<{ run: Run }>("/api/runs", { workflowId: workflow.id, params: values, watch });
+      const { run } = await jpost<{ run: Run }>("/api/runs", { workflowId: workflow.id, params: values, watch, profileId });
       navigate(`/runs/${run.id}`);
     } catch (e) {
       setError(String((e as Error).message));
@@ -56,6 +75,41 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
             {p.help && <span className="text-[11px] text-faint">{p.help}</span>}
           </div>
         ))}
+
+        <div className="flex flex-col gap-1.5">
+          <label className="label">Browser profile</label>
+          <div className="relative flex items-center">
+            <span
+              className="absolute left-3 w-2.5 h-2.5 rounded-full pointer-events-none"
+              style={{ background: selected?.color ?? "#3a3a3a" }}
+            />
+            <select
+              className="input appearance-none"
+              style={{ paddingLeft: 30 }}
+              value={profileId}
+              onChange={(e) => setProfileId(e.target.value)}
+            >
+              <option value="temporary">Temporary — fresh, no saved login</option>
+              {profiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                  {p.open ? " — window open" : ""}
+                </option>
+              ))}
+            </select>
+            <Icon name="chevronRight" size={14} className="absolute right-3 rotate-90 pointer-events-none text-faint" />
+          </div>
+          <span className="text-[11px] text-faint">
+            {profileId === "temporary" ? (
+              "Runs in a clean, isolated session that's discarded afterwards."
+            ) : (
+              <>
+                Uses {selected?.name ?? "this profile"}'s saved logins & cookies.{" "}
+                <Link to="/profiles" className="text-running hover:underline">Open it</Link> to log in or change settings.
+              </>
+            )}
+          </span>
+        </div>
 
         <label className="flex items-center gap-2.5 mt-1 cursor-pointer select-none" onClick={() => setWatch((w) => !w)}>
           <span className="w-9 h-5 rounded-full relative transition-colors" style={{ background: watch ? "#0072f5" : "#2a2a2a" }}>
