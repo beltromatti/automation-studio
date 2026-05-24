@@ -129,10 +129,16 @@ def create_app() -> FastAPI:
     @app.delete("/api/profiles/{pid}")
     async def delete_profile(pid: str):
         from . import profiles
-        # closing any open session first so its files aren't locked
-        await get_manager().close_profile_session(pid)
+        mgr = get_manager()
+        # never delete a profile a run is actively using (it runs on the master dir)
+        if any(r["profileId"] == pid and r["status"] in ("starting", "running", "controlled")
+               for r in mgr.list()):
+            return JSONResponse({"error": "profile is busy with a run"}, status_code=400)
+        # close any open login window first so its files aren't locked
+        await mgr.close_profile_session(pid)
         ok = profiles.delete(pid)
-        return {"ok": ok} if ok else JSONResponse({"error": "cannot delete (default or not found)"}, status_code=400)
+        return {"ok": ok} if ok else JSONResponse(
+            {"error": "cannot delete the last remaining profile"}, status_code=400)
 
     @app.post("/api/profiles/{pid}/open")
     async def open_profile(pid: str):

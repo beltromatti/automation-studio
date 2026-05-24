@@ -51,15 +51,17 @@ def _save(meta: dict) -> None:
     META_FILE.write_text(json.dumps(meta, indent=2))
 
 
-def _ensure_default(meta: dict) -> dict:
-    """Register a 'Default' profile pointing at the pre-existing profiles/default
-    dir (which already holds any earlier login), if not tracked yet."""
-    ids = {p["id"] for p in meta["profiles"]}
-    if "default" not in ids:
-        meta["profiles"].insert(0, {
+def _ensure_seed(meta: dict) -> dict:
+    """Guarantee at least one profile exists. On first run that's a 'Default'
+    profile (id 'default', pointing at the pre-existing profiles/default dir which
+    may already hold a login). 'Default' is NOT special — once other profiles
+    exist it can be renamed or deleted like any other; we only seed when there are
+    none at all (fresh install, or the last one was removed)."""
+    if not meta.get("profiles"):
+        meta["profiles"] = [{
             "id": "default", "name": "Default", "color": _DEFAULT_COLORS[0],
             "createdAt": time.time(), "lastUsedAt": None,
-        })
+        }]
         (PROFILES_DIR / "default").mkdir(parents=True, exist_ok=True)
         _save(meta)
     return meta
@@ -84,7 +86,7 @@ def clear_locks(pid: str) -> None:
 
 
 def list_profiles() -> list[dict]:
-    meta = _ensure_default(_load())
+    meta = _ensure_seed(_load())
     out = []
     for p in meta["profiles"]:
         d = master_dir(p["id"])
@@ -98,11 +100,11 @@ def list_profiles() -> list[dict]:
 
 
 def get(pid: str) -> dict | None:
-    return next((p for p in _ensure_default(_load())["profiles"] if p["id"] == pid), None)
+    return next((p for p in _ensure_seed(_load())["profiles"] if p["id"] == pid), None)
 
 
 def create(name: str) -> dict:
-    meta = _ensure_default(_load())
+    meta = _ensure_seed(_load())
     pid = uuid.uuid4().hex[:10]
     color = _DEFAULT_COLORS[len(meta["profiles"]) % len(_DEFAULT_COLORS)]
     entry = {"id": pid, "name": name.strip() or "Profile", "color": color,
@@ -114,7 +116,7 @@ def create(name: str) -> dict:
 
 
 def rename(pid: str, name: str) -> dict | None:
-    meta = _ensure_default(_load())
+    meta = _ensure_seed(_load())
     for p in meta["profiles"]:
         if p["id"] == pid:
             p["name"] = name.strip() or p["name"]
@@ -124,20 +126,22 @@ def rename(pid: str, name: str) -> dict | None:
 
 
 def delete(pid: str) -> bool:
-    if pid == "default":
-        return False  # keep the default profile
-    meta = _ensure_default(_load())
-    before = len(meta["profiles"])
+    """Delete a profile and its on-disk data. Any profile can be deleted EXCEPT
+    the last remaining one — there must always be at least one profile alongside
+    the ephemeral option. 'default' has no special protection of its own."""
+    meta = _ensure_seed(_load())
+    if pid not in {p["id"] for p in meta["profiles"]}:
+        return False  # not found
+    if len(meta["profiles"]) <= 1:
+        return False  # can't remove the last remaining profile
     meta["profiles"] = [p for p in meta["profiles"] if p["id"] != pid]
-    if len(meta["profiles"]) == before:
-        return False
     _save(meta)
     shutil.rmtree(master_dir(pid), ignore_errors=True)
     return True
 
 
 def touch(pid: str) -> None:
-    meta = _ensure_default(_load())
+    meta = _ensure_seed(_load())
     for p in meta["profiles"]:
         if p["id"] == pid:
             p["lastUsedAt"] = time.time()

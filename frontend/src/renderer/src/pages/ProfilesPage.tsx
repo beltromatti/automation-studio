@@ -132,6 +132,7 @@ export default function ProfilesPage() {
               key={p.id}
               profile={p}
               busy={busy === p.id}
+              deletable={profiles.length > 1}
               onChange={load}
               onError={setError}
               act={act}
@@ -152,12 +153,14 @@ export default function ProfilesPage() {
 function ProfileCard({
   profile: p,
   busy,
+  deletable,
   onChange,
   onError,
   act,
 }: {
   profile: Profile;
   busy: boolean;
+  deletable: boolean;
   onChange: () => void;
   onError: (s: string) => void;
   act: (id: string, fn: () => Promise<unknown>) => Promise<void>;
@@ -165,7 +168,6 @@ function ProfileCard({
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(p.name);
   const [confirmDel, setConfirmDel] = useState(false);
-  const isDefault = p.id === "default";
 
   const saveName = async () => {
     const v = name.trim();
@@ -209,11 +211,6 @@ function ProfileCard({
         ) : (
           <div className="flex items-center gap-2">
             <span className="text-[13.5px] font-medium truncate">{p.name}</span>
-            {isDefault && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded text-faint" style={{ background: "#161616" }}>
-                default
-              </span>
-            )}
             {p.open && (
               <span className="text-[10px] px-1.5 py-0.5 rounded inline-flex items-center gap-1" style={{ background: "#2bd57618", color: "#2bd576" }}>
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: "#2bd576" }} /> window open
@@ -252,7 +249,7 @@ function ProfileCard({
           </button>
         )}
 
-        {!isDefault &&
+        {deletable &&
           (confirmDel ? (
             <button
               className="btn btn-danger btn-sm"
