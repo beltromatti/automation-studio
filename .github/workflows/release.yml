@@ -26,15 +26,19 @@ jobs:
           - os: macos-14      # Apple Silicon
             target: mac
             arch: arm64
-          - os: macos-13      # Intel (native hosted runner)
+            pyarch: arm64
+          - os: macos-14      # Intel build on a modern arm64 runner (x64 Python via Rosetta)
             target: mac
             arch: x64
+            pyarch: x64
           - os: windows-latest
             target: win
             arch: x64
+            pyarch: x64
           - os: ubuntu-latest
             target: linux
             arch: x64
+            pyarch: x64
     env:
       # secrets exposed as env so they're usable in step `if:` conditions
       MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
@@ -51,6 +55,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          architecture: ${{ matrix.pyarch }}
 
       - uses: actions/setup-node@v4
         with:
@@ -145,6 +150,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
+    if: always()  # publish whatever targets succeeded, even if one leg failed
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
