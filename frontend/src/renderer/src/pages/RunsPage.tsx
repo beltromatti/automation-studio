@@ -1,31 +1,30 @@
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
 import { RunRow } from "@/components/RunRow";
-import { jpost } from "@/lib/client";
 import { useRuns } from "@/components/RunsProvider";
-import type { Settings } from "@/lib/types";
+
+const ACTIVE = ["running", "starting", "controlled"];
 
 export default function RunsPage() {
-  const { runs, settings, refresh } = useRuns();
+  const { runs } = useRuns();
+  const active = runs.filter((r) => ACTIVE.includes(r.status)).length;
+  const queued = runs.filter((r) => r.status === "queued").length;
 
-  const setConc = async (n: number) => {
-    await jpost<Settings>("/api/settings", { maxConcurrency: n });
-    refresh();
-  };
-
+  // No concurrency knob: runs on the same persistent profile go one at a time
+  // (the rest queue), and everything else runs in parallel automatically.
   return (
     <>
       <Header
         title="Runs"
         sub={`${runs.length} total`}
         actions={
-          <div className="flex items-center gap-2 text-[12px] text-muted">
-            <span>Max concurrency</span>
-            <div className="flex items-center card overflow-hidden" style={{ height: 32 }}>
-              <button className="px-2.5 h-full hover:bg-elevated" onClick={() => setConc(settings.maxConcurrency - 1)}>−</button>
-              <span className="px-2 mono text-fg">{settings.maxConcurrency}</span>
-              <button className="px-2.5 h-full hover:bg-elevated" onClick={() => setConc(settings.maxConcurrency + 1)}>+</button>
-            </div>
+          <div className="flex items-center gap-3 text-[12px] text-muted">
+            {active > 0 && (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full" style={{ background: "#3b9eff" }} /> {active} active
+              </span>
+            )}
+            {queued > 0 && <span className="text-faint">{queued} queued</span>}
           </div>
         }
       />

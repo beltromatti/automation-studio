@@ -71,14 +71,31 @@ export default function ProfilesPage() {
         }
       />
       <div className="px-7 py-6 max-w-[860px]">
-        <div className="card p-4 mb-5 flex items-start gap-3 text-[12.5px] text-muted leading-relaxed">
+        <div className="card p-4 mb-3 flex items-start gap-3 text-[12.5px] text-muted leading-relaxed">
           <Icon name="user" size={16} />
           <div>
-            Each profile keeps its own logins, cookies and storage, fully isolated from the others.
-            Pick a profile when you run a workflow. <span className="text-fg">Open</span> a profile to
-            launch a browser window where you can log in or set things up — your session is saved and
-            reused by every run on that profile. Runs work on a fast copy, so many can run in parallel,
-            even on the same profile.
+            Each profile keeps its own logins, cookies, history and storage, fully isolated from the others.
+            Pick a profile when you run a workflow. <span className="text-fg">Open</span> a profile to launch a
+            browser window where you can log in or set things up — your session is saved and the profile
+            <span className="text-fg"> ages genuinely over time</span> as runs use it. Runs on the same profile
+            run <span className="text-fg">one at a time</span> (others queue); different profiles run in parallel.
+          </div>
+        </div>
+
+        {/* The built-in Ephemeral profile — not a managed entity, always available in the run form. */}
+        <div className="card p-4 mb-5 flex items-center gap-4 opacity-90">
+          <span className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: "#3a3a3a22", border: "1px dashed #3a3a3a" }}>
+            <Icon name="globe" size={16} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[13.5px] font-medium">Ephemeral</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded text-faint" style={{ background: "#161616" }}>built-in</span>
+            </div>
+            <div className="text-[11.5px] text-faint mt-0.5">
+              A fresh throwaway profile is spawned per run and deleted after — no login kept. Always selectable;
+              ephemeral runs all go in parallel. Nothing to manage here.
+            </div>
           </div>
         </div>
 

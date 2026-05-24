@@ -17,17 +17,17 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const [error, setError] = useState("");
   const [profiles, setProfiles] = useState<Profile[]>([]);
   // Workflows that use a login default to the profile they were built around (id
-  // "default" today); everything else starts on a throwaway "Temporary" profile.
-  const [profileId, setProfileId] = useState<string>(workflow.needsAuth ? "default" : "temporary");
+  // "default" today); everything else starts on the throwaway Ephemeral profile.
+  const [profileId, setProfileId] = useState<string>(workflow.needsAuth ? "default" : "ephemeral");
 
   useEffect(() => {
     jget<{ profiles: Profile[] }>("/api/profiles")
       .then((d) => {
         setProfiles(d.profiles);
         setProfileId((cur) =>
-          cur === "temporary" || d.profiles.some((p) => p.id === cur)
+          cur === "ephemeral" || d.profiles.some((p) => p.id === cur)
             ? cur
-            : d.profiles[0]?.id ?? "temporary",
+            : d.profiles[0]?.id ?? "ephemeral",
         );
       })
       .catch(() => {});
@@ -89,7 +89,7 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
               value={profileId}
               onChange={(e) => setProfileId(e.target.value)}
             >
-              <option value="temporary">Temporary — fresh, no saved login</option>
+              <option value="ephemeral">Ephemeral — fresh throwaway, no saved login</option>
               {profiles.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -100,12 +100,13 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
             <Icon name="chevronRight" size={14} className="absolute right-3 rotate-90 pointer-events-none text-faint" />
           </div>
           <span className="text-[11px] text-faint">
-            {profileId === "temporary" ? (
-              "Runs in a clean, isolated session that's discarded afterwards."
+            {profileId === "ephemeral" ? (
+              "A new throwaway profile is spawned for the run and deleted after — no login, nothing kept. Ephemeral runs always run in parallel."
             ) : (
               <>
-                Uses {selected?.name ?? "this profile"}'s saved logins & cookies.{" "}
-                <Link to="/profiles" className="text-running hover:underline">Open it</Link> to log in or change settings.
+                Uses {selected?.name ?? "this profile"}'s saved logins & cookies, which keep building up over time.{" "}
+                <Link to="/profiles" className="text-running hover:underline">Open it</Link> to log in or set things up.
+                Runs on the same profile run one at a time (others queue).
               </>
             )}
           </span>

@@ -1,10 +1,16 @@
 """Browser profiles — self-contained browser environments (cookies, logins,
 history, storage), managed by the user and chosen per run.
 
-Chrome locks a user-data-dir to a single process, so to allow many parallel runs
-on the *same* profile we keep a persistent **master** dir per profile and give
-each run a fast **clone** of it (cookies/login preserved, caches/locks skipped).
-The master is edited only by a manual "open" session (for logging in / setup).
+A **persistent** profile keeps one on-disk **master** dir. Runs and the manual
+"open to log in" session both run *directly* on that dir, so it accumulates
+cookies/login/history and **ages genuinely**, like a real returning user. Chrome
+locks a user-data-dir to one process, so the orchestrator serialises a persistent
+profile (one run/session at a time); other profiles run in parallel. We clear any
+stale lock left by a previous hard-kill before each launch (``clear_locks``).
+
+The **ephemeral** profile is the exception: each run gets a brand-new throwaway
+dir (``fresh_for_run``), discarded afterwards — so ephemeral runs need no login,
+never dirty a real profile, and run fully in parallel.
 """
 from __future__ import annotations
 
@@ -20,18 +26,17 @@ PROFILES_DIR = data_dir() / "profiles"
 EPHEMERAL_DIR = PROFILES_DIR / "_ephemeral"
 META_FILE = PROFILES_DIR / "profiles.json"
 
-# Directory/file names that are pure cache or single-instance locks: skipped when
-# cloning so the clone is small, fast and not seen as "already in use" by Chrome.
-_SKIP = {
-    "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache",
-    "DawnWebGPUCache", "GrShaderCache", "ShaderCache", "Default Cache",
-    "component_crx_cache", "extensions_crx_cache",
-    # single-instance locks + transient runtime files (must not be cloned)
+_DEFAULT_COLORS = ["#0072f5", "#2bd576", "#f5a623", "#ff5c5c", "#a855f7", "#06b6d4", "#ec4899"]
+
+# Single-instance lock / transient runtime files Chrome leaves at the root of the
+# user-data-dir. If a previous session was hard-killed they can linger and make
+# the next launch think the profile is "already in use" — we clear them before
+# (re)opening a persistent profile, which is safe because runs on a persistent
+# profile are serialised (never two at once).
+_LOCK_FILES = {
     "SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile",
     "RunningChromeVersion", "DevToolsActivePort", "CrashpadMetrics-active.pma",
 }
-
-_DEFAULT_COLORS = ["#0072f5", "#2bd576", "#f5a623", "#ff5c5c", "#a855f7", "#06b6d4", "#ec4899"]
 
 
 def _load() -> dict:
@@ -62,6 +67,20 @@ def _ensure_default(meta: dict) -> dict:
 
 def master_dir(pid: str) -> Path:
     return PROFILES_DIR / pid
+
+
+def clear_locks(pid: str) -> None:
+    """Remove stale single-instance lock / transient files from a profile's master
+    dir so the next launch starts cleanly. Ensures the dir exists too."""
+    d = master_dir(pid)
+    d.mkdir(parents=True, exist_ok=True)
+    for name in _LOCK_FILES:
+        p = d / name
+        try:
+            if p.is_symlink() or p.exists():
+                p.unlink()
+        except OSError:
+            pass
 
 
 def list_profiles() -> list[dict]:
@@ -126,45 +145,10 @@ def touch(pid: str) -> None:
             return
 
 
-def _robust_copy(src: Path, dst: Path) -> None:
-    """Recursive copy that skips caches/locks, ignores non-regular files
-    (sockets/fifos) and tolerates files Chrome removes mid-copy — so cloning a
-    live-ish profile never fails."""
-    dst.mkdir(parents=True, exist_ok=True)
-    try:
-        entries = list(src.iterdir())
-    except OSError:
-        return
-    for item in entries:
-        if item.name in _SKIP:
-            continue
-        try:
-            if item.is_symlink():
-                continue
-            if item.is_dir():
-                _robust_copy(item, dst / item.name)
-            elif item.is_file():
-                shutil.copy2(item, dst / item.name)
-            # anything else (socket/fifo/device) is skipped
-        except (FileNotFoundError, OSError):
-            continue  # transient/special file — safe to skip
-
-
-def clone_for_run(pid: str, run_id: str) -> str:
-    """Copy a profile's master into an ephemeral per-run dir (login preserved,
-    caches/locks skipped) so the run is isolated and parallel-safe. Returns path."""
-    dst = EPHEMERAL_DIR / run_id
-    shutil.rmtree(dst, ignore_errors=True)
-    src = master_dir(pid)
-    if src.exists():
-        _robust_copy(src, dst)
-    else:
-        dst.mkdir(parents=True, exist_ok=True)
-    return str(dst)
-
-
 def fresh_for_run(run_id: str) -> str:
-    """A brand-new empty profile for this run (no login, nothing persisted)."""
+    """A brand-new empty profile dir for an *ephemeral* run — no login, nothing
+    persisted, discarded on teardown. Each ephemeral run gets its own, so any
+    number of them run in parallel without ever touching a real profile."""
     dst = EPHEMERAL_DIR / run_id
     shutil.rmtree(dst, ignore_errors=True)
     dst.mkdir(parents=True, exist_ok=True)

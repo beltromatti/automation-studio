@@ -7,11 +7,16 @@ import { ProgressBar } from "@/components/ProgressBar";
 import { LogView } from "@/components/LogView";
 import { CsvTable } from "@/components/CsvTable";
 import { RunControls } from "@/components/RunControls";
+import { useRuns } from "@/components/RunsProvider";
 import { jget, duration, timeAgo } from "@/lib/client";
 import type { Run } from "@/lib/types";
 
+const ACTIVE = ["running", "starting", "controlled"];
+const isEphemeral = (id: string) => id === "ephemeral" || id === "temporary" || !id;
+
 export default function RunDetail() {
   const { id } = useParams<{ id: string }>();
+  const { runs: allRuns } = useRuns();
   const [run, setRun] = useState<Run | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const liveRef = useRef(true);
@@ -43,6 +48,10 @@ export default function RunDetail() {
 
   const active = run.status === "running" || run.status === "starting";
   const showResults = run.rows != null || run.status === "succeeded" || run.status === "controlled" || run.status === "failed";
+  const waiting =
+    run.status === "queued" &&
+    !isEphemeral(run.profileId) &&
+    allRuns.some((r) => r.id !== run.id && r.profileId === run.profileId && ACTIVE.includes(r.status));
 
   return (
     <>
@@ -65,7 +74,7 @@ export default function RunDetail() {
               <span className="inline-flex items-center gap-1.5 text-[11.5px] px-2 py-0.5 rounded-md" style={{ background: "#161616", border: "1px solid var(--color-line)" }}>
                 <Icon name="user" size={12} />
                 {run.profileName}
-                {run.profileId === "temporary" && <span className="text-faint">· throwaway</span>}
+                {(run.profileId === "ephemeral" || run.profileId === "temporary") && <span className="text-faint">· throwaway</span>}
               </span>
             )}
             <span className="text-[12px] text-faint mono ml-auto">
@@ -80,6 +89,13 @@ export default function RunDetail() {
               </span>
             ))}
           </div>
+
+          {waiting && (
+            <div className="mb-4 flex items-center gap-2 text-[12px] rounded-lg px-3 py-2" style={{ background: "#0072f512", color: "#3b9eff" }}>
+              <Icon name="clock" size={14} />
+              Queued — {run.profileName} is in use by another run. Runs on the same profile go one at a time.
+            </div>
+          )}
 
           <ProgressBar progress={run.progress ?? undefined} active={active} />
 

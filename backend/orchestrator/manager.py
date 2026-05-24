@@ -28,10 +28,21 @@ from humanbrowser.config import data_dir
 RS = "\x1e"
 PORT_BASE = 8810
 MAX_LOG_LINES = 600
-MAX_CONCURRENCY = 4
+# Concurrency is governed per-profile (a persistent profile runs one run at a
+# time; everything else runs in parallel), not by a user-set number. This is only
+# a machine-safety ceiling on simultaneous live browsers so a burst of ephemeral
+# runs can't spawn unbounded Chrome processes and panic the OS.
+GLOBAL_SAFETY_CAP = 8
 REAP_INTERVAL = 10  # seconds
 TERMINAL = {"succeeded", "failed", "canceled"}
 ACTIVE = {"starting", "running", "controlled"}
+# The special "ephemeral" profile: a fresh throwaway dir per run, deleted after.
+# Not serialised — many ephemeral runs go in parallel. ("temporary" = legacy id.)
+EPHEMERAL_IDS = {"ephemeral", "temporary", ""}
+
+
+def is_ephemeral(profile_id: str | None) -> bool:
+    return (profile_id or "") in EPHEMERAL_IDS
 
 DATA = data_dir()
 RUNS_DIR = DATA / "runs"
@@ -147,9 +158,12 @@ class RunManager:
             return {"ok": False, "error": "unknown profile"}
         if pid in self.sessions:
             return {"ok": True, "port": self.sessions[pid]["port"]}
+        # one session at a time per profile: refuse if a run is using it right now
+        if any(r.status in ACTIVE and r.profileId == pid for r in self.runs.values()):
+            return {"ok": False, "error": "profile is busy with a run — wait for it to finish"}
         port = self._alloc_port()
+        profiles.clear_locks(pid)  # also mkdir's the master + drops any stale lock
         master = str(profiles.master_dir(pid))
-        Path(master).mkdir(parents=True, exist_ok=True)
         cmd = _self_base() + ["control-server", "--port", str(port), "--profile", master]
         proc = await self._spawn(cmd)
         self.sessions[pid] = {"proc": proc, "port": port}
@@ -172,6 +186,7 @@ class RunManager:
             self.sessions.pop(pid, None)
 
     async def close_profile_session(self, pid: str) -> dict:
+        from . import profiles
         s = self.sessions.get(pid)
         if not s:
             return {"ok": True}
@@ -179,8 +194,15 @@ class RunManager:
             await self._server_post(s["port"], "/shutdown")
         except Exception:
             pass
+        # let the clean close flush the profile's DBs + free the lock before killing
+        try:
+            await asyncio.wait_for(s["proc"].wait(), timeout=10)
+        except Exception:
+            pass
         kill_tree(s["proc"].pid)
         self.sessions.pop(pid, None)
+        profiles.clear_locks(pid)
+        self.schedule()  # runs queued behind this profile can now start
         return {"ok": True}
 
     def open_session_ids(self) -> list[str]:
@@ -279,7 +301,7 @@ class RunManager:
         return self.settings
 
     def create(self, workflow_id: str, params: dict, watch: bool = False,
-               profile_id: str = "temporary") -> Run:
+               profile_id: str = "ephemeral") -> Run:
         from .registry import get_workflow
         from . import profiles
         wf = get_workflow(workflow_id)
@@ -288,13 +310,13 @@ class RunManager:
         for p in wf.params:
             if p.required and not params.get(p.name):
                 raise ValueError(f"missing required parameter: {p.label}")
-        if profile_id and profile_id != "temporary":
+        if is_ephemeral(profile_id):
+            profile_id, profile_name = "ephemeral", "Ephemeral"
+        else:
             prof = profiles.get(profile_id)
             if not prof:
                 raise ValueError(f"unknown profile: {profile_id}")
             profile_name = prof["name"]
-        else:
-            profile_id, profile_name = "temporary", "Temporary"
         rid = uuid.uuid4().hex[:8]
         run = Run(id=rid, workflowId=workflow_id, workflowName=wf.name, params=params,
                   status="queued", watch=bool(watch), createdAt=time.time(),
@@ -366,17 +388,34 @@ class RunManager:
 
     # ------------------------------------------------------------------ scheduling
     def schedule(self) -> None:
-        # Each run uses its own cloned profile dir, so runs never contend for a
-        # profile lock — they can all run in parallel up to maxConcurrency,
-        # whatever profile they use (same or different).
-        active = [r for r in self.runs.values() if r.status in ACTIVE]
-        running = sum(1 for r in active if r.status in ("running", "starting"))
-        slots = self.settings["maxConcurrency"] - running
-        if slots <= 0:
-            return
+        """Start queued runs under the per-profile concurrency rule:
+        - a **persistent** profile runs ONE run at a time (others queue behind it),
+          and an open manual login session also occupies it — so the profile ages
+          serially and genuinely, like a real returning user;
+        - **ephemeral** runs (and runs on *different* profiles) run in parallel,
+          bounded only by a machine-safety ceiling on simultaneous browsers.
+        """
+        # profiles occupied right now (by an active run or an open login session)
+        busy = set(self.sessions.keys())
+        for r in self.runs.values():
+            if r.status in ACTIVE and not is_ephemeral(r.profileId):
+                busy.add(r.profileId)
+        live = sum(1 for r in self.runs.values() if r.status in ACTIVE) + len(self.sessions)
         queued = sorted((r for r in self.runs.values() if r.status == "queued"), key=lambda r: r.createdAt)
-        for run in queued[:slots]:
+        started = False
+        for run in queued:
+            if live >= GLOBAL_SAFETY_CAP:
+                break
+            if not is_ephemeral(run.profileId):
+                if run.profileId in busy:
+                    continue  # its persistent profile is in use → keep it queued
+                busy.add(run.profileId)  # claim the profile for this scheduling pass
+            run.status = "starting"  # claim synchronously so a re-entrant schedule() can't double-start
+            live += 1
+            started = True
             asyncio.create_task(self._start_run_guarded(run))
+        if started:
+            self._save()
 
     async def _start_run_guarded(self, run: Run) -> None:
         try:
@@ -410,13 +449,18 @@ class RunManager:
         run.startedAt = time.time()
         port = self._alloc_port()
         run.serverPort = port
-        # Give the run an isolated, parallel-safe profile dir: a fast CLONE of the
-        # chosen profile (login preserved) or a fresh empty one for "Temporary".
-        if run.profileId and run.profileId != "temporary":
-            run.profileDir = profiles.clone_for_run(run.profileId, run.id)
-            profiles.touch(run.profileId)
-        else:
+        # Profile dir for this run:
+        #  - ephemeral → a fresh empty throwaway dir (deleted on teardown);
+        #  - persistent → the profile's MASTER dir directly, so cookies/login/
+        #    history accumulate and the profile ages genuinely. The scheduler
+        #    serialises persistent profiles, so no two processes share the dir;
+        #    we clear any stale lock left by a previous hard-kill before launch.
+        if is_ephemeral(run.profileId):
             run.profileDir = profiles.fresh_for_run(run.id)
+        else:
+            profiles.clear_locks(run.profileId)
+            run.profileDir = str(profiles.master_dir(run.profileId))
+            profiles.touch(run.profileId)
         (RUNS_DIR / run.id).mkdir(parents=True, exist_ok=True)
         self._save()
 
@@ -528,18 +572,31 @@ class RunManager:
 
     # ------------------------------------------------------------------ server helpers
     async def shutdown_server(self, run: Run) -> None:
+        from . import profiles
         run.browserOpen = False
-        pid = (self.procs.get(run.id, {}).get("server") or None)
-        pid = pid.pid if pid else None
+        server = self.procs.get(run.id, {}).get("server")
+        persistent = not is_ephemeral(run.profileId)
+        # Ask the control server to close cleanly: browser.stop() runs
+        # context.close(), which flushes the cookie/history SQLite DBs and frees
+        # the SingletonLock. For a persistent profile we must let that finish
+        # before killing the tree, or we'd hard-kill the master mid-flush.
         if run.serverPort:
             try:
                 await self._server_post(run.serverPort, "/shutdown")
             except Exception:
                 pass
-        kill_tree(pid)
-        if run.profileDir and run.profileDir.startswith(str(EPHEMERAL_DIR)):
+        if server and server.pid:
+            if persistent:
+                try:
+                    await asyncio.wait_for(server.wait(), timeout=10)
+                except Exception:
+                    pass
+            kill_tree(server.pid)  # ensure the whole tree is gone (no-op if already exited)
+        if persistent:
+            profiles.clear_locks(run.profileId)  # drop any lock the close left behind
+        elif run.profileDir and run.profileDir.startswith(str(EPHEMERAL_DIR)):
             try:
-                shutil.rmtree(run.profileDir, ignore_errors=True)
+                shutil.rmtree(run.profileDir, ignore_errors=True)  # discard the throwaway dir
             except Exception:
                 pass
         self.procs.pop(run.id, None)
