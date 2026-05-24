@@ -1,6 +1,6 @@
 {
   "name": "automation-studio",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Automation Studio — local desktop console for human-grade automations",
   "main": "./out/main/index.js",
   "author": "beltromatti",

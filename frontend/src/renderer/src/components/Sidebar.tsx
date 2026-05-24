@@ -18,13 +18,13 @@ export function Sidebar() {
 
   return (
     <aside className="w-[248px] shrink-0 border-r flex flex-col bg-panel" style={{ borderColor: "var(--color-line)" }}>
-      <div className="h-[60px] flex items-center gap-2.5 px-4 border-b" style={{ borderColor: "var(--color-line)" }}>
-        <div className="w-7 h-7 rounded-full flex items-center justify-center" style={{ background: "linear-gradient(135deg,#0072f5,#00d4ff)" }}>
+      <div className="app-drag sidebar-titlebar h-[60px] flex items-center gap-2.5 px-4 border-b" style={{ borderColor: "var(--color-line)" }}>
+        <div className="brand-logo w-7 h-7 rounded-full flex items-center justify-center shrink-0" style={{ background: "linear-gradient(135deg,#0072f5,#00d4ff)" }}>
           <Icon name="layers" size={15} />
         </div>
-        <div className="leading-tight">
-          <div className="text-[13px] font-semibold">Automation Console</div>
-          <div className="text-[11px] text-faint">human-grade workflows</div>
+        <div className="leading-tight min-w-0">
+          <div className="text-[13px] font-semibold truncate">Automation Studio</div>
+          <div className="text-[11px] text-faint truncate">human-grade workflows</div>
         </div>
       </div>
 
@@ -52,7 +52,7 @@ export function Sidebar() {
           <span className="w-2 h-2 rounded-full" style={{ background: active > 0 ? "#3b9eff" : "#2bd576" }} />
           {active > 0 ? `${active} active run${active > 1 ? "s" : ""}` : "idle"}
         </div>
-        <div className="mt-1">Automation Studio · v{(window as { api?: { version?: string } }).api?.version ?? "dev"}</div>
+        <div className="mt-1">Automation Studio · v{(window as { api?: { version?: string } }).api?.version ?? "0.0.0"}</div>
       </div>
     </aside>
   );

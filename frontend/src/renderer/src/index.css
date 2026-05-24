@@ -66,3 +66,24 @@ html, body {
 }
 html, body, #root { height: 100%; margin: 0; }
 body { font-family: var(--font-geist-sans); -webkit-font-smoothing: antialiased; }
+
+/* ---- custom cross-platform title bar ----------------------------------- */
+/* The top row is the window's drag handle on every OS; interactive controls
+   inside it must opt out so they stay clickable. */
+.app-drag { -webkit-app-region: drag; }
+.app-drag button,
+.app-drag a,
+.app-drag input,
+.app-drag select,
+.app-drag label,
+.app-drag [role="button"] { -webkit-app-region: no-drag; }
+
+/* macOS: traffic lights are drawn at the top-left over the sidebar header, so
+   inset its content and drop the in-app logo glyph (the lights stand in for it). */
+html[data-platform="darwin"] .sidebar-titlebar { padding-left: 76px; }
+html[data-platform="darwin"] .brand-logo { display: none; }
+
+/* Windows/Linux: native window controls are overlaid at the top-right, so keep
+   the main header's actions clear of them. */
+html[data-platform="win32"] .main-titlebar,
+html[data-platform="linux"] .main-titlebar { padding-right: 148px; }

@@ -14,6 +14,8 @@ extraResources:
     to: backend
   - from: resources/chromium
     to: chromium
+  - from: resources/tray
+    to: tray
 asar: true
 # the frozen backend must NOT be packed into asar (it's a real executable tree)
 asarUnpack: []

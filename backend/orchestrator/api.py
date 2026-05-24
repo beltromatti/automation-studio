@@ -38,7 +38,7 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     async def health():
         import os
-        return {"ok": True, "version": os.environ.get("AUTOMATION_VERSION", "dev")}
+        return {"ok": True, "version": os.environ.get("AUTOMATION_VERSION", "0.0.0")}
 
     @app.get("/api/workflows")
     async def workflows():

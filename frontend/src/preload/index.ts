@@ -9,5 +9,6 @@ function arg(name: string, fallback = ""): string {
 
 contextBridge.exposeInMainWorld("api", {
   backendUrl: arg("backend-url", "http://127.0.0.1:8765"),
-  version: arg("app-version", "dev"),
+  version: arg("app-version", "0.0.0"),
+  platform: process.platform, // "darwin" | "win32" | "linux" — drives the title bar layout
 });
