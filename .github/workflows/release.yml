@@ -84,13 +84,39 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # --- signing setup (free-basic by default; real certs via secrets) ---
+      - name: Prepare macOS signing
+        if: matrix.target == 'mac' && secrets.MAC_CSC_LINK != ''
+        shell: bash
+        run: |
+          echo "CSC_LINK=${{ secrets.MAC_CSC_LINK }}" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=${{ secrets.MAC_CSC_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+        # (no secret → build.mjs ad-hoc signs: free, runs locally, "right-click → Open" if downloaded)
+
+      - name: Prepare Windows signing (real cert)
+        if: matrix.target == 'win' && secrets.WIN_CSC_LINK != ''
+        shell: bash
+        run: |
+          echo "CSC_LINK=${{ secrets.WIN_CSC_LINK }}" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=${{ secrets.WIN_CSC_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Prepare Windows signing (free self-signed)
+        if: matrix.target == 'win' && secrets.WIN_CSC_LINK == ''
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Automation Studio (self-signed)" -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable
+          $pw = ConvertTo-SecureString -String "automation" -Force -AsPlainText
+          $pfx = Join-Path $env:RUNNER_TEMP "ss.pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $pw | Out-Null
+          "CSC_LINK=$pfx"          | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CSC_KEY_PASSWORD=automation" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Build & package
         shell: bash
         working-directory: frontend
         env:
-          # macOS signing + notarization (set these as repo secrets to sign for real)
-          CSC_LINK: ${{ matrix.target == 'mac' && secrets.MAC_CSC_LINK || (matrix.target == 'win' && secrets.WIN_CSC_LINK || '') }}
-          CSC_KEY_PASSWORD: ${{ matrix.target == 'mac' && secrets.MAC_CSC_KEY_PASSWORD || (matrix.target == 'win' && secrets.WIN_CSC_KEY_PASSWORD || '') }}
+          # CSC_LINK / CSC_KEY_PASSWORD come from the prepare steps above (if any).
+          # APPLE_* enable notarization on macOS when provided as secrets.
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
