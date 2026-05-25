@@ -19,8 +19,19 @@ export function Sidebar() {
   return (
     <aside className="w-[248px] shrink-0 border-r flex flex-col bg-panel" style={{ borderColor: "var(--color-line)" }}>
       <div className="app-drag sidebar-titlebar h-[60px] flex items-center gap-2.5 px-4 border-b" style={{ borderColor: "var(--color-line)" }}>
-        <div className="brand-logo w-7 h-7 rounded-full flex items-center justify-center shrink-0" style={{ background: "linear-gradient(135deg,#0072f5,#00d4ff)" }}>
-          <Icon name="layers" size={15} />
+        <div
+          className="brand-logo shrink-0 font-extrabold select-none"
+          style={{
+            fontSize: 27,
+            lineHeight: 1,
+            fontFamily: '"Helvetica Neue", Helvetica, Arial, sans-serif',
+            background: "linear-gradient(135deg,#3b9eff,#00d4ff)",
+            WebkitBackgroundClip: "text",
+            backgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+          }}
+        >
+          A
         </div>
         <div className="leading-tight min-w-0">
           <div className="text-[13px] font-semibold truncate">Automation Studio</div>

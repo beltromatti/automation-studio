@@ -79,9 +79,8 @@ body { font-family: var(--font-geist-sans); -webkit-font-smoothing: antialiased;
 .app-drag [role="button"] { -webkit-app-region: no-drag; }
 
 /* macOS: traffic lights are drawn at the top-left over the sidebar header, so
-   inset its content and drop the in-app logo glyph (the lights stand in for it). */
-html[data-platform="darwin"] .sidebar-titlebar { padding-left: 76px; }
-html[data-platform="darwin"] .brand-logo { display: none; }
+   inset its content past them (the "A" brand mark then sits just to their right). */
+html[data-platform="darwin"] .sidebar-titlebar { padding-left: 72px; }
 
 /* Windows/Linux: native window controls are overlaid at the top-right, so keep
    the main header's actions clear of them. */
