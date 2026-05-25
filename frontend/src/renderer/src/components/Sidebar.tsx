@@ -20,7 +20,8 @@ export function Sidebar() {
   return (
     <aside className="w-[248px] shrink-0 border-r flex flex-col bg-panel" style={{ borderColor: "var(--color-line)" }}>
       <div className="app-drag sidebar-titlebar h-[60px] flex items-center gap-2.5 px-4 border-b" style={{ borderColor: "var(--color-line)" }}>
-        <img src={iconUrl} alt="Automation Studio" className="brand-logo shrink-0 select-none" style={{ height: 42, width: 42, objectFit: "contain" }} draggable={false} />
+        <img src={iconUrl} alt="" className="brand-logo shrink-0 select-none" style={{ height: 28, width: 28, objectFit: "contain" }} draggable={false} />
+        <div className="text-[13px] font-semibold truncate min-w-0">Automation Studio</div>
       </div>
 
       <nav className="p-3 flex flex-col gap-0.5">
