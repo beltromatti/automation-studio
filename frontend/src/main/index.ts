@@ -109,12 +109,11 @@ function showMainWindow() {
 function createTray() {
   if (tray) return;
   // Background-presence indicator + the only guaranteed Quit affordance once the
-  // window hides on close. Template image on mac (adapts to light/dark menu bar),
-  // colored elsewhere. Skip silently if the asset is missing.
-  const iconPath = isMac ? resourcePath("tray", "trayTemplate.png") : resourcePath("tray", "tray.png");
+  // window hides on close. Uses the real app icon (the "A STUDIO" mark), sized
+  // for the menu bar/tray — same brand on every platform. Skip if asset missing.
+  const iconPath = resourcePath("tray", "tray.png");
   if (!existsSync(iconPath)) return;
   const img = nativeImage.createFromPath(iconPath);
-  if (isMac) img.setTemplateImage(true);
   tray = new Tray(img);
   tray.setToolTip("Automation Studio");
   const menu = Menu.buildFromTemplate([
