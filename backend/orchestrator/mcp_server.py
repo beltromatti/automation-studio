@@ -135,7 +135,8 @@ def t_run_workflow(a):
     profile = a.get("profileId") or AGENT_PROFILE_ID
     body = {"workflowId": a["workflowId"], "params": a.get("params", {}),
             "profileId": profile, "watch": a.get("watch", False),
-            "datasetId": a.get("datasetId"), "agentId": AGENT_ID or None}
+            "datasetId": a.get("datasetId"), "inputDatasetId": a.get("inputDatasetId"),
+            "agentId": AGENT_ID or None}
     # When the agent owns a browser and runs on its own profile, the workflow
     # shares that browser (attach) instead of launching a second one.
     if CONTROL_PORT_INT and profile == AGENT_PROFILE_ID:
@@ -238,10 +239,11 @@ STUDIO_TOOLS = [
                                        "icon": {"type": "string"}}, "required": ["name", "code"]}, t_create_workflow),
     ("studio_workflow_source", "Read the Python source of a user/agent workflow (to inspect or modify it).",
      {"type": "object", "properties": {"workflowId": {"type": "string"}}, "required": ["workflowId"]}, t_workflow_source),
-    ("studio_run_workflow", "Start a workflow run. Defaults to this agent's own profile. Optionally bind a datasetId to auto-append the result on success. Returns runId.",
+    ("studio_run_workflow", "Start a workflow run. Defaults to this agent's own profile. Bind datasetId to auto-append the result on success. For list-consuming workflows (those with an input contract, e.g. url-titles), set inputDatasetId to feed a dataset of rows as input. Returns runId.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}, "params": {"type": "object"},
                                        "profileId": {"type": "string"}, "datasetId": {"type": "string"},
-                                       "watch": {"type": "boolean"}}, "required": ["workflowId"]}, t_run_workflow),
+                                       "inputDatasetId": {"type": "string"}, "watch": {"type": "boolean"}},
+      "required": ["workflowId"]}, t_run_workflow),
     ("studio_run_status", "Get a run's current status, progress, row count and error.",
      {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]}, t_run_status),
     ("studio_wait_run", "Block until a run reaches a terminal state (succeeded/failed/canceled) or the timeout, then return its status. Use this instead of polling.",

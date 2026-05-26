@@ -103,6 +103,7 @@ class Run:
     datasetId: str | None = None  # optional: append this run's result here on success
     attachPort: int | None = None  # if set, attach to an agent's existing control-server (shared browser)
     agentId: str | None = None     # the agent session that launched this run, if any
+    inputDatasetId: str | None = None  # a dataset fed as the run's input list (list-consuming workflows)
 
 
 class RunManager:
@@ -305,7 +306,8 @@ class RunManager:
 
     def create(self, workflow_id: str, params: dict, watch: bool = False,
                profile_id: str = "ephemeral", dataset_id: str | None = None,
-               attach_port: int | None = None, agent_id: str | None = None) -> Run:
+               attach_port: int | None = None, agent_id: str | None = None,
+               input_dataset_id: str | None = None) -> Run:
         from .registry import get_workflow
         from . import profiles
         wf = get_workflow(workflow_id)
@@ -325,7 +327,8 @@ class RunManager:
         run = Run(id=rid, workflowId=workflow_id, workflowName=wf.name, params=params,
                   status="queued", watch=bool(watch), createdAt=time.time(),
                   profileKey=profile_id, profileId=profile_id, profileName=profile_name,
-                  datasetId=dataset_id or None, attachPort=attach_port or None, agentId=agent_id or None)
+                  datasetId=dataset_id or None, attachPort=attach_port or None, agentId=agent_id or None,
+                  inputDatasetId=input_dataset_id or None)
         self.runs[rid] = run
         (RUNS_DIR / rid).mkdir(parents=True, exist_ok=True)
         self._save()
@@ -440,6 +443,30 @@ class RunManager:
             self._save()
             self.schedule()
 
+    def _input_args(self, run: Run, wf) -> list[str]:
+        """For a list-consuming workflow bound to an input dataset, dump the dataset
+        rows to input.json and pass --input-json (read by automations.userkit)."""
+        if not run.inputDatasetId or not getattr(wf, "input_contract", None):
+            return []
+        try:
+            from . import datastore
+            rows, offset = [], 0
+            while True:
+                page = datastore.get_rows(run.inputDatasetId, limit=5000, offset=offset)["rows"]
+                if not page:
+                    break
+                rows += [{k: v for k, v in r.items() if k != "_rid"} for r in page]
+                offset += len(page)
+                if len(page) < 5000:
+                    break
+            p = RUNS_DIR / run.id / "input.json"
+            p.write_text(json.dumps(rows))
+            self._log(run.id, f"[backend] input dataset {run.inputDatasetId}: {len(rows)} rows")
+            return ["--input-json", str(p)]
+        except Exception as e:
+            self._log(run.id, f"[backend] input dataset load failed: {e}")
+            return []
+
     def _alloc_port(self) -> int:
         used = {r.serverPort for r in self.runs.values() if r.serverPort}
         for p in range(PORT_BASE, PORT_BASE + 80):
@@ -465,7 +492,7 @@ class RunManager:
             self._save()
             csv = str(RUNS_DIR / run.id / "output.csv")
             work_cmd = _self_base() + ["run-workflow", wf.target] + wf.build_argv(run.params) + \
-                ["--server", f"http://127.0.0.1:{run.attachPort}", "-o", csv]
+                self._input_args(run, wf) + ["--server", f"http://127.0.0.1:{run.attachPort}", "-o", csv]
             work = await self._spawn(work_cmd)
             self.procs.setdefault(run.id, {})["work"] = work
             asyncio.create_task(self._pump(run.id, work.stdout))
@@ -509,7 +536,8 @@ class RunManager:
 
         # 2) workflow, attached to the server
         csv = str(RUNS_DIR / run.id / "output.csv")
-        work_cmd = _self_base() + ["run-workflow", wf.target] + wf.build_argv(run.params) + ["--server", f"http://127.0.0.1:{port}", "-o", csv]
+        work_cmd = _self_base() + ["run-workflow", wf.target] + wf.build_argv(run.params) + \
+            self._input_args(run, wf) + ["--server", f"http://127.0.0.1:{port}", "-o", csv]
         work = await self._spawn(work_cmd)
         self.procs.setdefault(run.id, {})["work"] = work
         asyncio.create_task(self._pump(run.id, work.stdout))

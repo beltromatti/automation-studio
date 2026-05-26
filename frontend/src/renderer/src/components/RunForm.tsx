@@ -22,6 +22,8 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [dest, setDest] = useState<string>(""); // "" none | dataset id | "__new__"
   const [newDsName, setNewDsName] = useState(`${workflow.name} results`);
+  const [inputDatasetId, setInputDatasetId] = useState<string>("");
+  const consumesInput = (workflow.inputContract ?? []).length > 0;
 
   useEffect(() => {
     jget<{ profiles: Profile[] }>("/api/profiles")
@@ -53,7 +55,7 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
       } else if (dest) {
         datasetId = dest;
       }
-      const { run } = await jpost<{ run: Run }>("/api/runs", { workflowId: workflow.id, params: values, watch, profileId, datasetId });
+      const { run } = await jpost<{ run: Run }>("/api/runs", { workflowId: workflow.id, params: values, watch, profileId, datasetId, inputDatasetId: inputDatasetId || undefined });
       navigate(`/runs/${run.id}`);
     } catch (e) {
       setError(String((e as Error).message));
@@ -64,6 +66,20 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   return (
     <div className="card p-5 max-w-[560px]">
       <div className="flex flex-col gap-4">
+        {consumesInput && (
+          <div className="flex flex-col gap-1.5">
+            <label className="label">Input dataset<span className="text-danger"> *</span> <span className="text-faint">— rows fed to this workflow ({(workflow.inputContract ?? []).map((c) => c.name).join(", ")})</span></label>
+            <div className="relative flex items-center">
+              <span className="absolute left-3 pointer-events-none text-faint"><Icon name="database" size={14} /></span>
+              <select className="input appearance-none" style={{ paddingLeft: 32 }} value={inputDatasetId} onChange={(e) => setInputDatasetId(e.target.value)}>
+                <option value="">— pick a dataset to process —</option>
+                {datasets.map((d) => <option key={d.id} value={d.id}>{d.name} ({d.rowCount ?? 0} rows)</option>)}
+              </select>
+              <Icon name="chevronRight" size={14} className="absolute right-3 rotate-90 pointer-events-none text-faint" />
+            </div>
+            <span className="text-[11px] text-faint">This workflow runs over each row of the chosen dataset. Build one by projecting another workflow's output (Data → a dataset → Project).</span>
+          </div>
+        )}
         {workflow.params.map((p) => (
           <div key={p.name} className="flex flex-col gap-1.5">
             <label className="label">{p.label}{p.required && <span className="text-danger"> *</span>}</label>
@@ -168,7 +184,7 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
 
         {error && <div className="text-[12px] text-danger">{error}</div>}
 
-        <button onClick={submit} disabled={busy} className="btn btn-primary mt-1 self-start">
+        <button onClick={submit} disabled={busy || (consumesInput && !inputDatasetId)} className="btn btn-primary mt-1 self-start">
           <Icon name="play" size={14} /> {busy ? "Starting…" : "Run workflow"}
         </button>
       </div>

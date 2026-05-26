@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.util
 import os
 import sys
 
@@ -56,7 +57,6 @@ def _run_workflow(argv: list[str]) -> int:
     # User/agent workflows are loaded from a .py file under the data dir; built-ins
     # are dotted modules in the bundle.
     if target.endswith(".py") or os.path.sep in target or os.path.exists(target):
-        import importlib.util
         spec = importlib.util.spec_from_file_location("_user_workflow", target)
         if not spec or not spec.loader:
             print(f"run-workflow: cannot load {target}", file=sys.stderr)

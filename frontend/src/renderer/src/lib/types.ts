@@ -38,6 +38,7 @@ export interface WorkflowDef {
   needsAuth?: boolean;
   params: WorkflowParam[];
   outputContract?: ContractColumn[]; // columns the result CSV carries
+  inputContract?: ContractColumn[]; // when set, consumes a dataset of these columns as input
   builtin?: boolean; // false for user/agent-authored workflows
   createdBy?: string; // "builtin" | "user" | "agent"
   buildArgs: (p: Record<string, unknown>) => string[];

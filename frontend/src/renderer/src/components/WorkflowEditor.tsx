@@ -38,6 +38,8 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
     (w?.params ?? []).map((p) => ({ name: p.name, label: p.label, type: p.type, default: p.default, help: p.help })));
   const [contract, setContract] = useState<{ name: string; type: ColumnType }[]>(
     (w?.outputContract ?? []).map((c) => ({ name: c.name, type: c.type })));
+  const [inputC, setInputC] = useState<{ name: string; type: ColumnType }[]>(
+    (w?.inputContract ?? []).map((c) => ({ name: c.name, type: c.type })));
   const [code, setCode] = useState(isNew ? TEMPLATE : "");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -59,6 +61,7 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
         name, description, profile, needsAuth, code, createdBy: "user", icon: w?.icon ?? "wand",
         params: params.filter((p) => p.name.trim()).map((p) => ({ ...p, label: p.label || p.name })),
         outputContract: contract.filter((c) => c.name.trim()),
+        inputContract: inputC.filter((c) => c.name.trim()),
       };
       if (!isNew && w) body.id = w.id;
       const r = await jpost<{ workflow: { id: string } }>("/api/workflows", body);
@@ -114,6 +117,17 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
             </span>
           ))}
           <button className="btn btn-secondary btn-sm" onClick={() => setContract((cs) => [...cs, { name: "", type: "text" }])}><Icon name="plus" size={12} /> Column</button>
+        </div>
+
+        <label className="label">Input columns <span className="text-faint">(optional — set to consume a dataset as a list; read rows with <span className="mono">userkit.input_rows()</span>)</span></label>
+        <div className="flex flex-wrap items-center gap-1.5 mt-1 mb-3">
+          {inputC.map((c, i) => (
+            <span key={i} className="flex items-center gap-1 card px-1.5 py-1">
+              <input className="input" style={{ height: 26, width: 110 }} placeholder="name" value={c.name} onChange={(e) => setInputC((cs) => cs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
+              <button className="text-faint hover:text-fg" onClick={() => setInputC((cs) => cs.filter((_, j) => j !== i))}><Icon name="x" size={11} /></button>
+            </span>
+          ))}
+          <button className="btn btn-secondary btn-sm" onClick={() => setInputC((cs) => [...cs, { name: "", type: "text" }])}><Icon name="plus" size={12} /> Input column</button>
         </div>
 
         <label className="label flex items-center gap-2">Python code <span className="text-faint">— define <span className="mono">main(argv)</span>; use <span className="mono">automations.userkit</span></span></label>

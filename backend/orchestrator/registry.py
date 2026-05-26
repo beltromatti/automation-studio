@@ -47,6 +47,10 @@ class WorkflowDef:
     # text|number|boolean). Lets a Dataset adopt/validate the shape when a run is
     # captured into the data layer (Phase 2). Empty = inferred from the CSV header.
     output_contract: list[dict] = field(default_factory=list)
+    # When non-empty, this workflow CONSUMES an input dataset (a list of rows with
+    # these columns) — the orchestrator dumps the chosen dataset to input.json and
+    # passes --input-json. This is what lets workflows chain (A's output → B's input).
+    input_contract: list[dict] = field(default_factory=list)
     # Origin: built-ins ship in the bundle (module = dotted import path); user/agent
     # workflows are files under the data dir (path set), differing only by a chip.
     builtin: bool = True
@@ -159,6 +163,24 @@ WORKFLOWS: list[WorkflowDef] = [
             {"name": "extra", "type": "text"},
         ],
     ),
+    # Demonstrates dataset-as-input: consumes a list of URLs and fetches each page's
+    # title. Same shape as a "connect each profile" / "message each lead" workflow,
+    # the multi-workflow pipeline the agent layer chains together.
+    WorkflowDef(
+        id="url-titles",
+        name="Page Titles (from a list)",
+        description="Takes a dataset of URLs and visits each one to fetch its page title. "
+        "A list-consuming workflow — the second half of a pipeline (feed it the output of another).",
+        icon="globe",
+        module="automations.url_titles",
+        profile="ephemeral",
+        needs_auth=False,
+        params=[],
+        build_argv=lambda p: ["--params-json", json.dumps(p)],
+        input_contract=[{"name": "url", "type": "text"}],
+        output_contract=[{"name": "url", "type": "text"}, {"name": "title", "type": "text"},
+                         {"name": "ok", "type": "boolean"}],
+    ),
 ]
 
 
@@ -177,6 +199,7 @@ def _def_from_meta(m: dict) -> WorkflowDef:
         params=[WorkflowParam(**{k: pp.get(k) for k in WorkflowParam.__dataclass_fields__ if k in pp})
                 for pp in m.get("params", [])],
         output_contract=m.get("outputContract", []), build_argv=_user_argv,
+        input_contract=m.get("inputContract", []),
         builtin=False, created_by=m.get("createdBy", "user"),
         path=str(USER_DIR / m["file"]),
     )
@@ -241,6 +264,7 @@ def save_user_workflow(body: dict) -> dict:
         "icon": body.get("icon", "wand"), "profile": body.get("profile", "ephemeral"),
         "profileName": body.get("profileName"), "needsAuth": bool(body.get("needsAuth")),
         "params": body.get("params", []), "outputContract": body.get("outputContract", []),
+        "inputContract": body.get("inputContract", []),
         "file": file, "createdBy": body.get("createdBy", "user"),
         "createdAt": (existing or {}).get("createdAt") or time.time(), "updatedAt": time.time(),
     }
@@ -278,5 +302,6 @@ def public_workflow(w: WorkflowDef) -> dict:
         "needsAuth": w.needs_auth,
         "params": [vars(p) for p in w.params],
         "outputContract": w.output_contract,
+        "inputContract": w.input_contract,
         "builtin": w.builtin, "createdBy": w.created_by,
     }

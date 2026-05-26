@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import csv as _csv
 import json
+import os
 import sys
 from typing import Any, Callable
 
@@ -55,6 +56,21 @@ def parse(argv=None) -> tuple[dict, str | None, str | None]:
     except json.JSONDecodeError:
         params = {}
     return params, a.server, a.output
+
+
+def input_rows(argv=None) -> list[dict]:
+    """Rows of the input dataset the run was given (for list-consuming workflows).
+    The orchestrator passes ``--input-json <path>``; empty list if none."""
+    p = argparse.ArgumentParser()
+    p.add_argument("--input-json", default=None)
+    a, _unknown = p.parse_known_args(argv if argv is not None else sys.argv[1:])
+    if a.input_json and os.path.exists(a.input_json):
+        try:
+            with open(a.input_json, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
 
 
 def session(server: str | None = None, *, headless: bool = True, profile: str | None = None):

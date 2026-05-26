@@ -79,7 +79,7 @@ def create_app() -> FastAPI:
         try:
             run = mgr.create(body["workflowId"], body.get("params") or {}, bool(body.get("watch")),
                              body.get("profileId") or "ephemeral", body.get("datasetId"),
-                             body.get("attachPort"), body.get("agentId"))
+                             body.get("attachPort"), body.get("agentId"), body.get("inputDatasetId"))
             return {"run": mgr.get(run.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
