@@ -70,7 +70,7 @@ export default function AgentsPage() {
                 <div className="flex items-center justify-between mt-4 pt-4 border-t" style={{ borderColor: "var(--color-line)" }}>
                   <span className="text-[11px] text-faint mono">{last ? `last ${last.status}` : "never launched"}{missing ? " · engine missing" : ""}</span>
                   <div className="flex items-center gap-1.5">
-                    <button className="btn btn-secondary btn-sm" onClick={() => setEditing(a)} title="Edit agent"><Icon name="pencil" size={13} /></button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => setEditing(a)} title={a.builtin ? "Duplicate (built-ins can't be edited in place)" : "Edit agent"}><Icon name="pencil" size={13} /></button>
                     {!a.builtin && <button className="btn btn-secondary btn-sm" title="Delete agent" onClick={async () => { if (confirm(`Delete agent "${a.name}"?`)) { await jdel(`/api/agents/${a.id}`); loadAgents(); } }}><Icon name="trash" size={13} /></button>}
                     <Link to={`/agents/${a.id}`} className="btn btn-primary btn-sm" aria-disabled={!!missing} onClick={(e) => { if (missing) e.preventDefault(); }}>
                       <Icon name="play" size={13} /> Launch
@@ -112,7 +112,7 @@ function AgentEditor({ agent, engines, onClose, onSaved }: {
 }) {
   const isNew = agent === "new";
   const a = isNew ? null : (agent as AgentDef);
-  const [name, setName] = useState(a?.name ?? "");
+  const [name, setName] = useState(a ? (a.builtin ? `${a.name} (copy)` : a.name) : "");
   const [description, setDescription] = useState(a?.description ?? "");
   const [engine, setEngine] = useState<AgentEngine>(a?.engine ?? "codex");
   const [systemPrompt, setSystemPrompt] = useState(a?.systemPrompt ?? "");
@@ -121,12 +121,10 @@ function AgentEditor({ agent, engines, onClose, onSaved }: {
   const toggle = (s: string) => setScopes((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
   const save = async () => {
     if (!name.trim()) { setError("Name is required."); return; }
-    if (a?.builtin && !confirm(
-      "This is a built-in agent. It's better not to modify built-ins directly — consider duplicating " +
-      "one and making your own instead. Save changes anyway?")) return;
     try {
       const body = { name, description, engine, systemPrompt, scopes: scopes.includes("studio") ? scopes : ["studio", ...scopes] };
-      if (isNew) await jpost("/api/agents", body);
+      // built-ins can't be modified in place — saving forks a new copy (same as workflows)
+      if (isNew || a?.builtin) await jpost("/api/agents", body);
       else await jpost(`/api/agents/${a!.id}/update`, body);
       onSaved();
     } catch (e) { setError(String((e as Error).message)); }
@@ -135,9 +133,15 @@ function AgentEditor({ agent, engines, onClose, onSaved }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: "#000000aa" }} onClick={onClose}>
       <div className="card p-5 overflow-auto" style={{ width: 580, maxWidth: "92vw", maxHeight: "90vh" }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-3">
-          <div className="text-[14px] font-semibold">{isNew ? "New agent" : `Edit ${a!.name}`}</div>
+          <div className="text-[14px] font-semibold">{isNew ? "New agent" : a!.builtin ? `Duplicate ${a!.name}` : `Edit ${a!.name}`}</div>
           <button className="text-faint hover:text-fg" onClick={onClose}><Icon name="x" size={16} /></button>
         </div>
+        {a?.builtin && (
+          <div className="card p-3 mb-3 text-[12px] flex items-start gap-2" style={{ background: "#f5a62312", color: "#f5a623", borderColor: "#4a3a1a" }}>
+            <Icon name="alert" size={15} />
+            <span>This is a <b>built-in</b> agent and can't be edited in place — saving creates your own editable copy. Prefer copying built-ins and building on them.</span>
+          </div>
+        )}
         <label className="label">Name</label>
         <input className="input mt-1 mb-3" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Lead Hunter" />
         <label className="label">Description <span className="text-faint">(optional — shown on the card)</span></label>
@@ -158,7 +162,7 @@ function AgentEditor({ agent, engines, onClose, onSaved }: {
         <textarea className="input mt-1 mb-3" style={{ height: 120, padding: 10, lineHeight: 1.5 }} value={systemPrompt}
                   onChange={(e) => setSystemPrompt(e.target.value)} placeholder="Describe the agent's role, expertise and how it should work…" />
         {error && <div className="text-[12px] text-danger mb-2">{error}</div>}
-        <button className="btn btn-primary btn-sm" onClick={save}><Icon name="check" size={13} /> {isNew ? "Create agent" : "Save"}</button>
+        <button className="btn btn-primary btn-sm" onClick={save}><Icon name="check" size={13} /> {isNew ? "Create agent" : a!.builtin ? "Create copy" : "Save"}</button>
       </div>
     </div>
   );

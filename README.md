@@ -44,22 +44,26 @@ per-user data dir (`~/Library/Application Support/automation-studio`, `%APPDATA%
 
 ## Develop
 
-```bash
-# one-time
-python3.13 -m venv .venv && .venv/bin/pip install -e ./backend
-cd frontend && npm install
+The repo is one app: the root `package.json` is the entry point; the **backend
+engine** lives in `backend/` with its own `.venv` + `requirements.txt`, and the
+**Electron app shell** lives in `frontend/` with its own `node_modules`.
 
-# run the app in dev (opens Electron, spawns the Python backend, hot-reloads UI)
-cd frontend && npm run dev
+```bash
+# one-time — the backend engine (its own virtualenv, like frontend/node_modules)
+cd backend && python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
+cd .. && npm run frontend:install          # the app shell deps
+
+# run the app in dev FROM THE REPO ROOT (opens Electron, spawns the Python backend, hot-reloads UI)
+npm run dev
 ```
 
 ## Build the desktop app (this machine = macOS arm64)
 
 ```bash
-cd backend && ../.venv/bin/pyinstaller --noconfirm automation-backend.spec   # freeze backend
+cd backend && .venv/bin/pyinstaller --noconfirm automation-backend.spec   # freeze backend
 # (one-time) bundle Chromium for the target:
-PLAYWRIGHT_BROWSERS_PATH=frontend/resources/chromium .venv/bin/patchright install chromium
-cd frontend && npm run build:mac     # -> frontend/release/Automation Studio-*.dmg
+PLAYWRIGHT_BROWSERS_PATH=frontend/resources/chromium backend/.venv/bin/patchright install chromium
+npm run build:mac     # from the repo root -> frontend/release/Automation Studio-*.dmg
 ```
 
 Windows/Linux: the same flow run **on that OS** (`build:win` / `build:linux`) —

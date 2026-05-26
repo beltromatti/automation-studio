@@ -50,10 +50,12 @@ function startBackend(port: number) {
   let cwd: string;
 
   if (isDev) {
-    // dev: run from the repo's venv against the source backend + dev-data
+    // dev: run from the backend's own venv (backend/.venv) against the source
+    // backend + dev-data. The venv lives inside backend/ (like frontend/node_modules).
     const repoRoot = resolve(__dirname, "../../..");
     env.AUTOMATION_DATA_DIR = join(repoRoot, "dev-data");
-    cmd = join(repoRoot, ".venv", "bin", process.platform === "win32" ? "python.exe" : "python");
+    const venvBin = process.platform === "win32" ? join("Scripts", "python.exe") : join("bin", "python");
+    cmd = join(repoRoot, "backend", ".venv", venvBin);
     args = ["-m", "orchestrator", "api", "--port", String(port)];
     cwd = join(repoRoot, "backend");
   } else {

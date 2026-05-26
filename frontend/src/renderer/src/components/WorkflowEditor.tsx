@@ -55,10 +55,6 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
 
   const save = async () => {
     if (!name.trim()) { setError("Name is required."); return; }
-    if (w?.builtin && !confirm(
-      "This is a built-in workflow. Built-ins ship with the app and can't be changed in place — " +
-      "saving creates your own editable copy. It's best to copy built-ins and build on them rather " +
-      "than depend on editing them. Create a copy now?")) return;
     setBusy(true); setError("");
     try {
       const body: Record<string, unknown> = {

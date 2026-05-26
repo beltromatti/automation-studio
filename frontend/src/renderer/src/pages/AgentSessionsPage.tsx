@@ -30,7 +30,7 @@ export default function AgentSessionsPage() {
     <>
       <Header
         title="Sessions"
-        sub={`${sessions.length} total`}
+        sub="Agent runs — live transcripts you can watch, steer and continue any time"
         actions={
           <div className="flex items-center gap-3 text-[12px] text-muted">
             {active > 0 && (
@@ -39,6 +39,7 @@ export default function AgentSessionsPage() {
               </span>
             )}
             {idle > 0 && <span className="text-faint">{idle} idle</span>}
+            <span className="text-faint mono">{sessions.length} total</span>
           </div>
         }
       />

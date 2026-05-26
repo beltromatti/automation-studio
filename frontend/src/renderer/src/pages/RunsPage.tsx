@@ -16,7 +16,7 @@ export default function RunsPage() {
     <>
       <Header
         title="Runs"
-        sub={`${runs.length} total`}
+        sub="Every workflow execution — watch live progress, logs and results"
         actions={
           <div className="flex items-center gap-3 text-[12px] text-muted">
             {active > 0 && (
@@ -25,6 +25,7 @@ export default function RunsPage() {
               </span>
             )}
             {queued > 0 && <span className="text-faint">{queued} queued</span>}
+            <span className="text-faint mono">{runs.length} total</span>
           </div>
         }
       />
