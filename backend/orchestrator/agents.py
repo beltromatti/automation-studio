@@ -41,6 +41,12 @@ TERMINAL = {"done", "failed", "canceled"}
 
 ENGINES = {"codex", "claude"}
 
+# Model + reasoning effort each engine runs at (the most capable settings).
+CODEX_MODEL = "gpt-5.5"
+CODEX_EFFORT = "xhigh"        # codex: model_reasoning_effort (minimal|low|medium|high|xhigh)
+CLAUDE_MODEL = "claude-opus-4-7"
+CLAUDE_EFFORT = "max"        # claude: --effort (low|medium|high|max)
+
 
 def _find_binary(engine: str) -> str | None:
     """Resolve the user's installed CLI. Finder-launched apps don't inherit the
@@ -557,6 +563,8 @@ class AgentManager:
         full_prompt = (f"{sysprompt}\n\n---\nTask: {prompt}" if sysprompt and not resume else prompt)
         cmd = [binary, "exec", "--json", "--skip-git-repo-check",
                "--dangerously-bypass-approvals-and-sandbox", "-C", ws,
+               "-m", CODEX_MODEL,
+               "-c", f'model_reasoning_effort="{CODEX_EFFORT}"',
                "-c", f'mcp_servers.studio.command="{mcp_cmd}"',
                "-c", "mcp_servers.studio.args=[" + ",".join(json.dumps(a) for a in mcp_args) + "]",
                "-c", f'mcp_servers.studio.cwd="{BACKEND_DIR}"',
@@ -575,6 +583,7 @@ class AgentManager:
         cfg_path = SESSIONS_DIR / s.id / "mcp.json"
         cfg_path.write_text(json.dumps(cfg))
         cmd = [binary, "-p", prompt, "--output-format", "stream-json", "--verbose",
+               "--model", CLAUDE_MODEL, "--effort", CLAUDE_EFFORT,
                "--mcp-config", str(cfg_path), "--allowedTools", "mcp__studio",
                "--permission-mode", "bypassPermissions"]
         if sysprompt:
