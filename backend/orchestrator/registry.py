@@ -12,11 +12,12 @@ from typing import Any, Callable
 class WorkflowParam:
     name: str
     label: str
-    type: str  # "string" | "number" | "boolean"
+    type: str  # "string" | "number" | "boolean" | "select"
     required: bool = False
     default: Any = None
     placeholder: str = ""
     help: str = ""
+    options: list[dict] | None = None  # for "select": [{"value","label"}, ...]
 
 
 @dataclass
@@ -31,6 +32,33 @@ class WorkflowDef:
     profile_name: str | None = None
     needs_auth: bool = False
     params: list[WorkflowParam] = field(default_factory=list)
+
+
+def _linkedin_argv(p: dict) -> list[str]:
+    """Map the LinkedIn People params to the workflow's CLI arguments."""
+    argv: list[str] = []
+    q = str(p.get("query", "") or "").strip()
+    if q:
+        argv.append(q)  # positional fuzzy keywords
+
+    def add(flag: str, key: str) -> None:
+        v = str(p.get(key, "") or "").strip()
+        if v:
+            argv.extend([flag, v])
+
+    add("--current-title", "currentTitle")
+    add("--first-name", "firstName")
+    add("--last-name", "lastName")
+    add("--current-company", "currentCompany")
+    add("--school", "school")
+    add("--location", "locations")
+    add("--industries", "industries")
+    add("--connections", "connections")
+    add("--profile-languages", "profileLanguages")
+    mode = str(p.get("mode", "full") or "full").strip().lower()
+    argv.extend(["--mode", "short" if mode == "short" else "full"])
+    argv.extend(["-n", str(int(p.get("limit", 25) or 25))])
+    return argv
 
 
 WORKFLOWS: list[WorkflowDef] = [
@@ -54,20 +82,41 @@ WORKFLOWS: list[WorkflowDef] = [
     WorkflowDef(
         id="linkedin-people",
         name="LinkedIn People",
-        description="Scrapes LinkedIn people-search result cards (name, profile URL, headline, "
-        "location, degree) without opening profiles. Uses your logged-in profile.",
+        description="Human-grade LinkedIn people search with the same targeting as LinkedIn's "
+        "own filters. In Full mode it opens each profile to enrich the row (about, current "
+        "company, education, connections, followers); Short mode reads result cards only. "
+        "Uses your logged-in profile.",
         icon="users",
         module="automations.linkedin_people",
         profile="shared",
         profile_name="default",
         needs_auth=True,
         params=[
-            WorkflowParam("query", "Search query", "string", required=True,
-                          placeholder="software engineer milano"),
-            WorkflowParam("limit", "Profiles", "number", default=50,
+            WorkflowParam("mode", "Mode", "select", default="full",
+                          options=[{"value": "full", "label": "Full — open each profile & enrich"},
+                                   {"value": "short", "label": "Short — result cards only"}],
+                          help="Full opens every profile (one page each, human-paced) to add about, "
+                               "company, education, connections & followers. Short is faster and lighter."),
+            WorkflowParam("query", "Keywords", "string",
+                          placeholder="data engineer",
+                          help="General fuzzy search. Combine with the filters below for sharper targeting."),
+            WorkflowParam("currentTitle", "Current job title", "string", placeholder="Data Engineer"),
+            WorkflowParam("locations", "Locations", "string", placeholder="Milan, London",
+                          help="Comma-separated. Resolved through LinkedIn's own location autocomplete."),
+            WorkflowParam("currentCompany", "Current company", "string", placeholder="Google"),
+            WorkflowParam("industries", "Industries", "string", placeholder="Financial Services",
+                          help="Comma-separated. Resolved through LinkedIn's industry autocomplete."),
+            WorkflowParam("school", "School", "string", placeholder="Politecnico di Milano"),
+            WorkflowParam("connections", "Connection degree", "string", placeholder="2nd,3rd",
+                          help="Any of 1st, 2nd, 3rd (comma-separated). Blank = all."),
+            WorkflowParam("firstName", "First name", "string"),
+            WorkflowParam("lastName", "Last name", "string"),
+            WorkflowParam("profileLanguages", "Profile language", "string", placeholder="en, it",
+                          help="Comma-separated language codes."),
+            WorkflowParam("limit", "Profiles", "number", default=25,
                           help="Target number of profiles (paginates as needed)."),
         ],
-        build_argv=lambda p: [str(p.get("query", "")), "-n", str(int(p.get("limit", 50) or 50))],
+        build_argv=_linkedin_argv,
     ),
 ]
 

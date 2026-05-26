@@ -60,6 +60,16 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
               >
                 {values[p.name] ? "On" : "Off"}
               </button>
+            ) : p.type === "select" ? (
+              <select
+                className="input appearance-none"
+                value={String(values[p.name] ?? "")}
+                onChange={(e) => setValues((v) => ({ ...v, [p.name]: e.target.value }))}
+              >
+                {(p.options ?? []).map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
             ) : (
               <input
                 className="input"

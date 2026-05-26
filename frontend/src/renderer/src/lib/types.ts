@@ -7,7 +7,7 @@ export type RunStatus =
   | "canceled"
   | "controlled"; // paused, browser handed to the human
 
-export type ParamType = "string" | "number" | "boolean";
+export type ParamType = "string" | "number" | "boolean" | "select";
 
 export interface WorkflowParam {
   name: string;
@@ -17,6 +17,7 @@ export interface WorkflowParam {
   default?: string | number | boolean;
   placeholder?: string;
   help?: string;
+  options?: { value: string; label: string }[]; // for "select"
 }
 
 export interface WorkflowDef {
