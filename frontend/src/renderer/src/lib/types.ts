@@ -127,6 +127,7 @@ export interface AgentDef {
   name: string;
   engine: AgentEngine;
   icon: string;
+  description?: string; // optional, human-facing
   systemPrompt: string;
   scopes: string[]; // "studio" and/or "browser"
   createdAt: number;

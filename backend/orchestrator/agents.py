@@ -71,7 +71,8 @@ class AgentDef:
     name: str
     engine: str                       # "codex" | "claude"
     icon: str = "sparkles"
-    systemPrompt: str = ""            # the agent's skills / role
+    description: str = ""             # optional, human-facing (shown on the card)
+    systemPrompt: str = ""            # the agent's skills / role (injected)
     scopes: list[str] = field(default_factory=lambda: ["studio"])  # + "browser"
     createdAt: float = 0.0
     builtin: bool = False
@@ -251,24 +252,34 @@ class AgentManager:
             pass
 
     def _seed(self) -> None:
-        if self.defs:
-            return
         now = time.time()
         seeds = [
             AgentDef(id="studio-ops", name="Studio Operator", engine="codex", icon="sparkles", builtin=True,
                      scopes=["studio"], createdAt=now,
+                     description="Runs and chains your workflows and curates the data layer — capture run "
+                     "results into datasets, dedup, and project tidy inputs for the next step.",
                      systemPrompt="You operate Automation Studio. Use the studio_ tools to inspect workflows, "
                      "run them, and read/clean/combine datasets. Prefer datasets for anything multi-step: capture "
                      "run results, dedup, project columns to prep the next workflow's input. Be concise."),
             AgentDef(id="browser-pilot", name="Browser Pilot", engine="codex", icon="globe", builtin=True,
                      scopes=["studio", "browser"], createdAt=now,
+                     description="Drives a real browser for you and can launch workflows on the same session — "
+                     "observe the page, click, type and extract like a careful human, step by step.",
                      systemPrompt="You drive a real browser for the user. Use browser_observe to see the indexed "
                      "page, then browser_click / browser_type / browser_eval to act like a careful human. You can "
                      "also run workflows and use datasets via the studio_ tools. Go step by step and verify."),
         ]
+        changed = False
         for s in seeds:
-            self.defs[s.id] = s
-        self._save_defs()
+            existing = self.defs.get(s.id)
+            if not existing:
+                self.defs[s.id] = s            # first run: add the built-in
+                changed = True
+            elif existing.builtin and not existing.description:
+                existing.description = s.description  # backfill on update, respecting user edits
+                changed = True
+        if changed:
+            self._save_defs()
 
     def _save_defs(self) -> None:
         try:
@@ -314,7 +325,8 @@ class AgentManager:
             raise ValueError(f"unknown engine: {engine}")
         did = uuid.uuid4().hex[:8]
         d = AgentDef(id=did, name=body.get("name", "Agent"), engine=engine,
-                     icon=body.get("icon", "sparkles"), systemPrompt=body.get("systemPrompt", ""),
+                     icon=body.get("icon", "sparkles"), description=body.get("description", ""),
+                     systemPrompt=body.get("systemPrompt", ""),
                      scopes=body.get("scopes") or ["studio"], createdAt=time.time())
         self.defs[did] = d
         self._save_defs()
@@ -324,7 +336,7 @@ class AgentManager:
         d = self.defs.get(did)
         if not d:
             return None
-        for k in ("name", "engine", "icon", "systemPrompt", "scopes"):
+        for k in ("name", "engine", "icon", "description", "systemPrompt", "scopes"):
             if k in body:
                 setattr(d, k, body[k])
         self._save_defs()

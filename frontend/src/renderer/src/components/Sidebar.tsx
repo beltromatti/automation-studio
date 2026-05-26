@@ -4,9 +4,11 @@ import { Icon } from "./Icon";
 import { useRuns } from "./RunsProvider";
 import iconUrl from "@/assets/icon.png";
 
+// Conceptually top-down: an agent orchestrates many workflows; a workflow spawns
+// many runs. So the nav reads Agents → Workflows → Runs → Data → Profiles.
 const NAV = [
-  { href: "/", label: "Workflows", icon: "layers" },
   { href: "/agents", label: "Agents", icon: "sparkles" },
+  { href: "/", label: "Workflows", icon: "layers" },
   { href: "/runs", label: "Runs", icon: "terminal" },
   { href: "/data", label: "Data", icon: "database" },
   { href: "/profiles", label: "Profiles", icon: "user" },
