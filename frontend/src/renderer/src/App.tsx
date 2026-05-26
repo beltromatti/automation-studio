@@ -10,6 +10,7 @@ import DatasetsPage from "@/pages/DatasetsPage";
 import DatasetPage from "@/pages/DatasetPage";
 import AgentsPage from "@/pages/AgentsPage";
 import AgentLaunchPage from "@/pages/AgentLaunchPage";
+import AgentSessionsPage from "@/pages/AgentSessionsPage";
 import AgentSessionPage from "@/pages/AgentSessionPage";
 
 export default function App() {
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/runs" element={<RunsPage />} />
             <Route path="/runs/:id" element={<RunDetail />} />
             <Route path="/agents" element={<AgentsPage />} />
+            <Route path="/agents/sessions" element={<AgentSessionsPage />} />
             <Route path="/agents/sessions/:id" element={<AgentSessionPage />} />
             <Route path="/agents/:id" element={<AgentLaunchPage />} />
             <Route path="/data" element={<DatasetsPage />} />

@@ -4,22 +4,31 @@ import { Icon } from "./Icon";
 import { useRuns } from "./RunsProvider";
 import iconUrl from "@/assets/icon.png";
 
-// Conceptually top-down: an agent orchestrates many workflows; a workflow spawns
-// many runs. So the nav reads Agents → Workflows → Runs → Data → Profiles.
+// Conceptually top-down: an agent runs sessions; a workflow spawns runs. So each
+// "thing" sits above its executions: Agents → Sessions → Workflows → Runs → Data → Profiles.
 const NAV = [
   { href: "/agents", label: "Agents", icon: "sparkles" },
+  { href: "/agents/sessions", label: "Sessions", icon: "bot" },
   { href: "/", label: "Workflows", icon: "layers" },
   { href: "/runs", label: "Runs", icon: "terminal" },
   { href: "/data", label: "Data", icon: "database" },
   { href: "/profiles", label: "Profiles", icon: "user" },
 ];
 
+function matchesNav(href: string, pathname: string): boolean {
+  if (href === "/") return pathname === "/" || pathname.startsWith("/workflows");
+  return pathname === href || pathname.startsWith(href + "/");
+}
+
 export function Sidebar() {
   const pathname = useLocation().pathname;
   const { runs } = useRuns();
   const active = runs.filter((r) => ["running", "starting", "controlled"].includes(r.status)).length;
 
-  const is = (href: string) => (href === "/" ? pathname === "/" || pathname.startsWith("/workflows") : pathname.startsWith(href));
+  // The active item is the one whose href is the *longest* matching prefix, so
+  // /agents/sessions highlights Sessions (not also Agents).
+  const activeHref = NAV.map((n) => n.href).filter((h) => matchesNav(h, pathname)).sort((a, b) => b.length - a.length)[0] ?? "";
+  const is = (href: string) => href === activeHref;
 
   return (
     <aside className="w-[248px] shrink-0 border-r flex flex-col bg-panel" style={{ borderColor: "var(--color-line)" }}>

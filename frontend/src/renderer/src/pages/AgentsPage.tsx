@@ -2,24 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
-import { jget, jpost, jdel, timeAgo } from "@/lib/client";
+import { jget, jpost, jdel } from "@/lib/client";
+import { SessionRow } from "@/components/SessionRow";
 import type { AgentDef, AgentEngine, AgentSession, EngineInfo } from "@/lib/types";
-
-const STATUS_COLOR: Record<string, string> = {
-  starting: "#3b9eff", running: "#3b9eff", idle: "#f5a623",
-  done: "#2bd576", failed: "#ff5c5c", canceled: "#6e6e6e",
-};
-
-function Pill({ status }: { status: string }) {
-  const c = STATUS_COLOR[status] ?? "#6e6e6e";
-  const live = status === "running" || status === "starting";
-  return (
-    <span className="inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-md" style={{ background: `${c}1e`, color: c }}>
-      <span className="w-1.5 h-1.5 rounded-full" style={{ background: c, animation: live ? "pulse 1.2s infinite" : undefined }} />
-      {status}
-    </span>
-  );
-}
 
 export default function AgentsPage() {
   const navigate = useNavigate();
@@ -102,22 +87,17 @@ export default function AgentsPage() {
           )}
         </div>
 
-        {/* Sessions */}
+        {/* Recent sessions (full list lives on the Sessions page, like Workflows → Runs) */}
         <div className="mt-9">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-[14px] font-semibold flex items-center gap-2"><Icon name="terminal" size={15} /> Sessions</h2>
+            <h2 className="text-[14px] font-semibold">Recent sessions</h2>
+            <Link to="/agents/sessions" className="text-[12px] text-muted hover:text-fg flex items-center gap-1">
+              View all <Icon name="chevronRight" size={13} />
+            </Link>
           </div>
           <div className="flex flex-col gap-2">
-            {sessions.length === 0 && <div className="card p-6 text-center text-[12.5px] text-faint">No agent sessions yet — launch an agent above.</div>}
-            {sessions.slice(0, 12).map((s) => (
-              <Link key={s.id} to={`/agents/sessions/${s.id}`} className="card card-hover p-3.5 flex items-center gap-3">
-                <Pill status={s.status} />
-                <span className="text-[13px] font-medium shrink-0">{s.agentName}</span>
-                <span className="text-[11px] text-faint shrink-0">{s.engine}</span>
-                <span className="text-[11.5px] text-muted truncate flex-1">{s.prompt}</span>
-                <span className="text-[11px] text-faint mono shrink-0">{s.profileName} · {timeAgo(s.createdAt)}</span>
-              </Link>
-            ))}
+            {sessions.slice(0, 6).map((s) => <SessionRow key={s.id} session={s} />)}
+            {sessions.length === 0 && <div className="card p-8 text-center text-[13px] text-faint">No agent sessions yet — launch an agent above.</div>}
           </div>
         </div>
       </div>

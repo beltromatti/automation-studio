@@ -2,13 +2,9 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
-import { jget, jpost, timeAgo } from "@/lib/client";
+import { jget, jpost } from "@/lib/client";
+import { SessionRow } from "@/components/SessionRow";
 import type { AgentDef, AgentEngine, AgentSession, EngineInfo, Profile } from "@/lib/types";
-
-const STATUS_COLOR: Record<string, string> = {
-  starting: "#3b9eff", running: "#3b9eff", idle: "#f5a623",
-  done: "#2bd576", failed: "#ff5c5c", canceled: "#6e6e6e",
-};
 
 export default function AgentLaunchPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -118,18 +114,7 @@ export default function AgentLaunchPage() {
           <div className="mt-9">
             <h2 className="text-[14px] font-semibold mb-3">Sessions</h2>
             <div className="flex flex-col gap-2 max-w-[760px]">
-              {recent.map((s) => {
-                const c = STATUS_COLOR[s.status] ?? "#6e6e6e";
-                return (
-                  <Link key={s.id} to={`/agents/sessions/${s.id}`} className="card card-hover p-3.5 flex items-center gap-3">
-                    <span className="inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-md" style={{ background: `${c}1e`, color: c }}>
-                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: c }} /> {s.status}
-                    </span>
-                    <span className="text-[11.5px] text-muted truncate flex-1">{s.prompt}</span>
-                    <span className="text-[11px] text-faint mono shrink-0">{s.profileName} · {timeAgo(s.createdAt)}</span>
-                  </Link>
-                );
-              })}
+              {recent.map((s) => <SessionRow key={s.id} session={s} />)}
             </div>
           </div>
         )}
