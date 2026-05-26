@@ -101,6 +101,8 @@ class Run:
     error: str | None = None
     serverPort: int | None = None
     datasetId: str | None = None  # optional: append this run's result here on success
+    attachPort: int | None = None  # if set, attach to an agent's existing control-server (shared browser)
+    agentId: str | None = None     # the agent session that launched this run, if any
 
 
 class RunManager:
@@ -302,7 +304,8 @@ class RunManager:
         return self.settings
 
     def create(self, workflow_id: str, params: dict, watch: bool = False,
-               profile_id: str = "ephemeral", dataset_id: str | None = None) -> Run:
+               profile_id: str = "ephemeral", dataset_id: str | None = None,
+               attach_port: int | None = None, agent_id: str | None = None) -> Run:
         from .registry import get_workflow
         from . import profiles
         wf = get_workflow(workflow_id)
@@ -322,7 +325,7 @@ class RunManager:
         run = Run(id=rid, workflowId=workflow_id, workflowName=wf.name, params=params,
                   status="queued", watch=bool(watch), createdAt=time.time(),
                   profileKey=profile_id, profileId=profile_id, profileName=profile_name,
-                  datasetId=dataset_id or None)
+                  datasetId=dataset_id or None, attachPort=attach_port or None, agentId=agent_id or None)
         self.runs[rid] = run
         (RUNS_DIR / rid).mkdir(parents=True, exist_ok=True)
         self._save()
@@ -400,7 +403,7 @@ class RunManager:
         # profiles occupied right now (by an active run or an open login session)
         busy = set(self.sessions.keys())
         for r in self.runs.values():
-            if r.status in ACTIVE and not is_ephemeral(r.profileId):
+            if r.status in ACTIVE and not is_ephemeral(r.profileId) and not r.attachPort:
                 busy.add(r.profileId)
         live = sum(1 for r in self.runs.values() if r.status in ACTIVE) + len(self.sessions)
         queued = sorted((r for r in self.runs.values() if r.status == "queued"), key=lambda r: r.createdAt)
@@ -408,7 +411,9 @@ class RunManager:
         for run in queued:
             if live >= GLOBAL_SAFETY_CAP:
                 break
-            if not is_ephemeral(run.profileId):
+            if run.attachPort:
+                pass  # attaches to an agent's owned browser — no profile lock needed
+            elif not is_ephemeral(run.profileId):
                 if run.profileId in busy:
                     continue  # its persistent profile is in use → keep it queued
                 busy.add(run.profileId)  # claim the profile for this scheduling pass
@@ -449,6 +454,24 @@ class RunManager:
         wf = get_workflow(run.workflowId)
         run.status = "starting"
         run.startedAt = time.time()
+
+        # Attached run: an agent already owns a control-server on this profile; the
+        # workflow shares that browser instead of launching its own.
+        if run.attachPort:
+            run.serverPort = run.attachPort
+            run.browserOpen = True
+            run.status = "running"
+            self._log(run.id, f"[backend] attached to agent browser on :{run.attachPort} — launching workflow")
+            self._save()
+            csv = str(RUNS_DIR / run.id / "output.csv")
+            work_cmd = _self_base() + ["run-workflow", wf.module] + wf.build_argv(run.params) + \
+                ["--server", f"http://127.0.0.1:{run.attachPort}", "-o", csv]
+            work = await self._spawn(work_cmd)
+            self.procs.setdefault(run.id, {})["work"] = work
+            asyncio.create_task(self._pump(run.id, work.stdout))
+            asyncio.create_task(self._await_workflow(run, work))
+            return
+
         port = self._alloc_port()
         run.serverPort = port
         # Profile dir for this run:
@@ -575,12 +598,15 @@ class RunManager:
             if not run.error:
                 run.error = f"workflow exited with code {code}"
             self._log(run.id, f"[backend] failed: {run.error} — browser left open for inspection")
-            try:
-                await self._server_post(run.serverPort, "/switch_mode", {"headless": False})
-                await self._server_post(run.serverPort, "/pause")
-                run.watch = True
-            except Exception:
-                pass
+            if not run.attachPort:  # don't reconfigure an agent's shared browser
+                try:
+                    await self._server_post(run.serverPort, "/switch_mode", {"headless": False})
+                    await self._server_post(run.serverPort, "/pause")
+                    run.watch = True
+                except Exception:
+                    pass
+            else:
+                await self.shutdown_server(run)  # detach bookkeeping; keep agent's browser
         self._save()
         self.schedule()
 
@@ -588,6 +614,12 @@ class RunManager:
     async def shutdown_server(self, run: Run) -> None:
         from . import profiles
         run.browserOpen = False
+        # Attached run: the agent owns the control-server/browser — never touch it,
+        # just drop our bookkeeping for this workflow.
+        if run.attachPort:
+            self.procs.pop(run.id, None)
+            self.flags.pop(run.id, None)
+            return
         server = self.procs.get(run.id, {}).get("server")
         persistent = not is_ephemeral(run.profileId)
         # Ask the control server to close cleanly: browser.stop() runs

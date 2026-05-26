@@ -6,6 +6,7 @@ import iconUrl from "@/assets/icon.png";
 
 const NAV = [
   { href: "/", label: "Workflows", icon: "layers" },
+  { href: "/agents", label: "Agents", icon: "sparkles" },
   { href: "/runs", label: "Runs", icon: "terminal" },
   { href: "/data", label: "Data", icon: "database" },
   { href: "/profiles", label: "Profiles", icon: "user" },

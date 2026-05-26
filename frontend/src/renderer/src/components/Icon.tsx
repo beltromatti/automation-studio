@@ -34,6 +34,11 @@ const PATHS: Record<string, React.ReactNode> = {
   code: <><path d="m8 8-4 4 4 4" /><path d="m16 8 4 4-4 4" /><path d="m13 5-2 14" /></>,
   key: <><circle cx="8" cy="15" r="4" /><path d="m10.5 12.5 6-6" /><path d="m17 6 2 2" /><path d="m14 9 2 2" /></>,
   arrowRight: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
+  sparkles: <><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3Z" /><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8L19 14Z" /></>,
+  bot: <><rect x="4" y="8" width="16" height="11" rx="2.5" /><path d="M12 8V4" /><circle cx="12" cy="3" r="1.2" /><path d="M9 13h.01" /><path d="M15 13h.01" /><path d="M2 13v3" /><path d="M22 13v3" /></>,
+  send: <><path d="M22 2 11 13" /><path d="M22 2 15 22l-4-9-9-4 20-7Z" /></>,
+  square: <rect x="6" y="6" width="12" height="12" rx="2" />,
+  wand: <><path d="M15 4V2" /><path d="M15 10V8" /><path d="M11.5 6.5h-2" /><path d="M20.5 6.5h-2" /><path d="m3 21 12-12" /><path d="m12.5 6.5 5 5" /></>,
 };
 
 export function Icon({ name, size = 16, ...props }: { name: string; size?: number } & SVGProps<SVGSVGElement>) {

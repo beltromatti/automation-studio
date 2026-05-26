@@ -8,6 +8,7 @@ itself to launch control-servers and workflows (no separate `python`/`hb` needed
     automation-backend run-workflow MOD ...    # run a workflow module attached to a server
     automation-backend reap                    # kill any orphaned browser trees of ours
     automation-backend hb ...                  # the humanbrowser CLI (for agents)
+    automation-backend mcp                     # the stdio MCP tool server (spawned per agent)
 """
 from __future__ import annotations
 
@@ -24,6 +25,9 @@ def _run_api(argv: list[str]) -> int:
     p.add_argument("--port", type=int, default=int(os.environ.get("AUTOMATION_PORT", "8765")))
     p.add_argument("--host", default="127.0.0.1")
     args = p.parse_args(argv)
+    # record our actual port so in-process components (e.g. the agent manager
+    # building the MCP server's backend URL) can address this API.
+    os.environ["AUTOMATION_PORT"] = str(args.port)
     # tell the launcher we're about to bind (Electron also health-checks /api/health)
     print(f"[backend] api starting on http://{args.host}:{args.port}", flush=True)
     uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
@@ -76,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     if mode == "hb":
         from humanbrowser.cli import main as hb_main
         return hb_main(rest)
+    if mode == "mcp":
+        from .mcp_server import main as mcp_main
+        return mcp_main(rest)
     # default: treat unknown leading arg as api flags
     return _run_api(args)
 

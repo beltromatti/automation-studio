@@ -60,6 +60,8 @@ html, body {
   .mono { font-family: var(--font-mono); }
 }
 
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
 :root {
   --font-geist-sans: ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-geist-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;

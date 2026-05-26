@@ -19,9 +19,15 @@ from . import datastore
 async def lifespan(app: FastAPI):
     mgr = get_manager()
     await mgr.start()
+    from .agents import get_agents
+    get_agents()  # construct (loads defs/sessions, seeds built-ins)
     try:
         yield
     finally:
+        try:
+            await get_agents().shutdown()
+        except Exception:
+            pass
         await mgr.stop()
 
 
@@ -55,7 +61,8 @@ def create_app() -> FastAPI:
         mgr = get_manager()
         try:
             run = mgr.create(body["workflowId"], body.get("params") or {}, bool(body.get("watch")),
-                             body.get("profileId") or "ephemeral", body.get("datasetId"))
+                             body.get("profileId") or "ephemeral", body.get("datasetId"),
+                             body.get("attachPort"), body.get("agentId"))
             return {"run": mgr.get(run.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
@@ -283,5 +290,68 @@ def create_app() -> FastAPI:
     @app.post("/api/profiles/{pid}/close")
     async def close_profile(pid: str):
         return await get_manager().close_profile_session(pid)
+
+    # ---------------------------------------------------------------- agents
+    @app.get("/api/agents/engines")
+    async def agent_engines():
+        from .agents import engine_status
+        return {"engines": engine_status()}
+
+    @app.get("/api/agents/sessions")
+    async def agent_sessions():
+        from .agents import get_agents
+        return {"sessions": get_agents().list_sessions()}
+
+    @app.post("/api/agents/sessions")
+    async def agent_launch(body: dict = Body(...)):
+        from .agents import get_agents
+        try:
+            s = get_agents().launch(body["agentId"], body.get("profileId") or "ephemeral",
+                                    body.get("prompt", ""), bool(body.get("watch")))
+            return {"session": get_agents().get_session(s.id)}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.get("/api/agents/sessions/{sid}")
+    async def agent_session(sid: str):
+        from .agents import get_agents
+        s = get_agents().get_session(sid)
+        if not s:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return {"session": s, "events": get_agents().get_events(sid)}
+
+    @app.post("/api/agents/sessions/{sid}/steer")
+    async def agent_steer(sid: str, body: dict = Body(...)):
+        from .agents import get_agents
+        return get_agents().steer(sid, body.get("message", ""))
+
+    @app.post("/api/agents/sessions/{sid}/stop")
+    async def agent_stop(sid: str):
+        from .agents import get_agents
+        return await get_agents().stop(sid)
+
+    @app.get("/api/agents")
+    async def agents_list():
+        from .agents import get_agents
+        return {"agents": get_agents().list_defs()}
+
+    @app.post("/api/agents")
+    async def agents_create(body: dict = Body(...)):
+        from .agents import get_agents
+        try:
+            return {"agent": get_agents().create_def(body)}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.post("/api/agents/{aid}/update")
+    async def agents_update(aid: str, body: dict = Body(...)):
+        from .agents import get_agents
+        d = get_agents().update_def(aid, body)
+        return {"agent": d} if d else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.delete("/api/agents/{aid}")
+    async def agents_delete(aid: str):
+        from .agents import get_agents
+        return {"ok": get_agents().delete_def(aid)}
 
     return app

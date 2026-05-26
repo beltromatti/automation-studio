@@ -115,6 +115,62 @@ export interface DatasetRows {
   count: number;
 }
 
+// ---- Agents: the AI layer that drives the app and the browser ----------------
+export type AgentEngine = "codex" | "claude";
+export type AgentStatus = "starting" | "running" | "idle" | "done" | "failed" | "canceled";
+
+export interface AgentDef {
+  id: string;
+  name: string;
+  engine: AgentEngine;
+  icon: string;
+  systemPrompt: string;
+  scopes: string[]; // "studio" and/or "browser"
+  createdAt: number;
+  builtin?: boolean;
+}
+
+export interface AgentSession {
+  id: string;
+  agentId: string;
+  agentName: string;
+  engine: AgentEngine;
+  scopes: string[];
+  profileId: string;
+  profileName: string;
+  prompt: string;
+  status: AgentStatus;
+  watch: boolean;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  error?: string | null;
+  controlPort?: number | null;
+  threadId?: string | null;
+  usage?: Record<string, unknown> | null;
+  turns: number;
+  runIds: string[];
+}
+
+export interface AgentEvent {
+  t: number;
+  kind: "message" | "reasoning" | "tool_call" | "tool_result" | "status" | "usage" | "system" | "error";
+  text?: string;
+  tool?: string;
+  args?: unknown;
+  ok?: boolean;
+  result?: string;
+  status?: string;
+  usage?: Record<string, unknown>;
+  role?: string;
+  server?: string;
+}
+
+export interface EngineInfo {
+  available: boolean;
+  path: string | null;
+}
+
 // A browser profile: a self-contained, persistent browser environment (cookies,
 // logins, history, storage). Runs clone it so many can run in parallel.
 export interface Profile {
