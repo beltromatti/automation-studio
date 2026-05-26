@@ -181,6 +181,32 @@ WORKFLOWS: list[WorkflowDef] = [
         output_contract=[{"name": "url", "type": "text"}, {"name": "title", "type": "text"},
                          {"name": "ok", "type": "boolean"}],
     ),
+    # List-consuming outreach workflow: send a connection request to each profile.
+    # The second half of the people→connect pipeline — feed it LinkedIn People output
+    # (a dataset with a profile_url column). Resilient to LinkedIn's interstitials and
+    # to hidden-Connect / follow-only / already-connected / pending states.
+    WorkflowDef(
+        id="linkedin-connections",
+        name="LinkedIn Connections",
+        description="Takes a list of LinkedIn profiles and sends each a connection request, one at a "
+        "time and human-paced. Finds Connect even when it's hidden behind Follow, skips people you're "
+        "already connected to or have a pending invite with, and never follows. Output is the input "
+        "list with a status column. Uses your logged-in profile.",
+        icon="users",
+        module="automations.linkedin_connections",
+        profile="shared",
+        profile_name="default",
+        needs_auth=True,
+        params=[
+            WorkflowParam("maxInvites", "Max invites this run", "number", default=0,
+                          help="Safety cap on how many requests to actually send (0 = no cap). "
+                               "Already-connected / pending / can't-connect profiles don't count."),
+        ],
+        build_argv=lambda p: ["--params-json", json.dumps(p)],
+        input_contract=[{"name": "profile_url", "type": "text"}],
+        output_contract=[{"name": "profile_url", "type": "text"}, {"name": "name", "type": "text"},
+                         {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
+    ),
 ]
 
 
