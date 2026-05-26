@@ -120,7 +120,7 @@ export interface DatasetRows {
 
 // ---- Agents: the AI layer that drives the app and the browser ----------------
 export type AgentEngine = "codex" | "claude";
-export type AgentStatus = "starting" | "running" | "idle" | "done" | "failed" | "canceled";
+export type AgentStatus = "starting" | "queued" | "running" | "done" | "failed" | "canceled";
 
 export interface AgentDef {
   id: string;

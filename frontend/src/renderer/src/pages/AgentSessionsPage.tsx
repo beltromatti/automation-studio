@@ -5,7 +5,7 @@ import { SessionRow } from "@/components/SessionRow";
 import { jget } from "@/lib/client";
 import type { AgentSession } from "@/lib/types";
 
-const ACTIVE = ["running", "starting"];
+const ACTIVE = ["running", "starting", "queued"];
 
 export default function AgentSessionsPage() {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
@@ -24,7 +24,7 @@ export default function AgentSessionsPage() {
   }, [load]);
 
   const active = sessions.filter((s) => ACTIVE.includes(s.status)).length;
-  const idle = sessions.filter((s) => s.status === "idle").length;
+  const failed = sessions.filter((s) => s.status === "failed").length;
 
   return (
     <>
@@ -38,7 +38,7 @@ export default function AgentSessionsPage() {
                 <span className="w-2 h-2 rounded-full" style={{ background: "#3b9eff" }} /> {active} active
               </span>
             )}
-            {idle > 0 && <span className="text-faint">{idle} idle</span>}
+            {failed > 0 && <span style={{ color: "#ff8d8d" }}>{failed} failed</span>}
             <span className="text-faint mono">{sessions.length} total</span>
           </div>
         }

@@ -94,7 +94,7 @@ class AgentSession:
     profileId: str
     profileName: str
     prompt: str
-    status: str                       # starting|running|idle|done|failed|canceled
+    status: str                       # starting|queued|running|done|failed|canceled (done/failed/canceled are reactivatable)
     createdAt: float
     watch: bool = False
     startedAt: float | None = None
@@ -251,12 +251,15 @@ class AgentManager:
             if SESSIONS_FILE.exists():
                 for d in json.loads(SESSIONS_FILE.read_text()):
                     s = AgentSession(**{k: d[k] for k in AgentSession.__dataclass_fields__ if k in d})
-                    if s.status not in TERMINAL:
-                        # interrupted by a restart — resources are gone, but the
-                        # native thread persists, so leave it reactivatable.
-                        s.status = "idle"
-                        s.controlPort = None
-                        s.pendingSteers = []
+                    s.controlPort = None      # no browser survives a restart
+                    s.pendingSteers = []
+                    if s.status == "idle":
+                        s.status = "done"     # migrate the legacy rest state → done
+                    elif s.status not in TERMINAL:
+                        # interrupted mid-flight by a restart — resources are gone, but
+                        # the native thread persists, so it's still reactivatable.
+                        s.status = "failed"
+                        s.error = s.error or "interrupted (backend restarted)"
                         s.finishedAt = s.finishedAt or time.time()
                     self.sessions[s.id] = s
                     tf = SESSIONS_DIR / s.id / "transcript.jsonl"
@@ -410,7 +413,7 @@ class AgentManager:
     def steer(self, sid: str, message: str) -> dict:
         """Send a message to a session. If a turn is in flight, it's queued for the
         next turn; otherwise it REACTIVATES the session (resumes the native thread).
-        Works from idle/done/failed/canceled — sessions are continuable."""
+        Works from done/failed/canceled — sessions are continuable."""
         s = self.sessions.get(sid)
         if not s:
             return {"ok": False, "error": "no such session"}
@@ -558,6 +561,11 @@ class AgentManager:
                 continue
             for ev in normalize(obj):
                 self._emit(s.id, ev)
+                # a top-level error event (codex turn.failed / claude result error)
+                # means the agentic loop itself broke — distinct from a tool error.
+                if ev.get("kind") == "error":
+                    turn_flags["turn_error"] = True
+                    turn_flags["turn_error_msg"] = ev.get("text")
                 # track runs the agent started (tool_result of studio_run_workflow carries runId)
                 if ev.get("kind") == "tool_result" and ev.get("tool") in ("studio_run_workflow", ""):
                     rid = _extract_run_id(ev.get("result"))
@@ -577,8 +585,6 @@ class AgentManager:
             s.threadId = None
             await self._run_turn(s, prompt, resume=False, _retry=True)
             return
-        if code != 0 and s.status == "running":
-            self._emit(s.id, {"kind": "error", "text": f"{s.engine} exited with code {code}"})
         # A message queued during this turn → continue immediately, KEEPING the
         # browser (no restart between back-to-back turns).
         if s.pendingSteers and s.status != "canceled":
@@ -586,13 +592,26 @@ class AgentManager:
             self._save_sessions()
             await self._run_turn(s, nxt, resume=True)
             return
-        # At rest → release the browser/profile lock so other runs/agents can use
-        # it. The session stays fully reactivatable: a new message resumes it.
+        # At rest → release the browser/profile lock so other runs/agents can use it.
         await self._release_browser(s)
-        if s.status != "canceled":
-            s.status = "idle"
-            s.finishedAt = time.time()
-            self._emit(s.id, {"kind": "status", "status": "idle"})
+        if s.status == "canceled":
+            self._save_sessions()
+            return
+        # Decide the resting status. The engine binary breaking mid-turn (non-zero
+        # exit, or a top-level turn error) is a FAILURE — marked like a failed run,
+        # with the error surfaced. Otherwise the turn is DONE. Both are reactivatable.
+        if code != 0 or turn_flags.get("turn_error"):
+            s.status = "failed"
+            tail = "\n".join(turn_flags.get("stderr_tail") or [])
+            s.error = (turn_flags.get("turn_error_msg") or _short(tail, 500)
+                       or f"the {s.engine} agent ended unexpectedly (exit code {code})")
+            if not turn_flags.get("turn_error"):  # surface a crash that produced no error event
+                self._emit(s.id, {"kind": "error",
+                                  "text": f"the {s.engine} agent crashed mid-turn (exit code {code}). {s.error}"[:600]})
+        else:
+            s.status = "done"
+        s.finishedAt = time.time()
+        self._emit(s.id, {"kind": "status", "status": s.status})
         self._save_sessions()
 
     async def _drain_stderr(self, sid: str, stream, flags: dict | None = None) -> None:
@@ -609,11 +628,17 @@ class AgentManager:
             if not line:
                 continue
             low = line.lower()
-            # detect a failed resume so the caller can retry the message fresh
-            if flags is not None and ("no rollout" in low or ("resume" in low and ("fail" in low or "not found" in low))):
-                flags["resume_failed"] = True
+            if flags is not None:
+                # keep a rolling tail of stderr to use as the error message on a crash
+                tail = flags.setdefault("stderr_tail", [])
+                tail.append(line[:300])
+                if len(tail) > 15:
+                    del tail[0]
+                # detect a failed resume so the caller can retry the message fresh
+                if "no rollout" in low or ("resume" in low and ("fail" in low or "not found" in low)):
+                    flags["resume_failed"] = True
             # engine stderr is mostly progress noise; surface only error-ish lines
-            if any(w in low for w in ("error", "failed", "exception", "denied")):
+            if any(w in low for w in ("error", "failed", "exception", "denied", "traceback", "panic")):
                 self._emit(sid, {"kind": "system", "text": f"[{self.sessions[sid].engine}] {line[:200]}"})
 
     # ------------------------------------------------------------------ command builders

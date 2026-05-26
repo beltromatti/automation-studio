@@ -6,7 +6,7 @@ import { jget, jpost, duration, timeAgo } from "@/lib/client";
 import type { AgentEvent, AgentSession } from "@/lib/types";
 
 const STATUS_COLOR: Record<string, string> = {
-  starting: "#3b9eff", queued: "#9aa0a6", running: "#3b9eff", idle: "#f5a623",
+  starting: "#3b9eff", queued: "#9aa0a6", running: "#3b9eff",
   done: "#2bd576", failed: "#ff5c5c", canceled: "#6e6e6e",
 };
 const IN_FLIGHT = ["starting", "queued", "running"]; // a turn is running (or waiting for a profile)
@@ -95,6 +95,13 @@ export default function AgentSessionPage() {
           </span>
         </div>
 
+        {s.status === "failed" && s.error && (
+          <div className="mb-4 text-[12.5px] rounded-lg px-3 py-2.5" style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>
+            <span className="font-medium">Agent failed:</span> {s.error}
+            <span className="text-faint"> — send a message to retry/continue.</span>
+          </div>
+        )}
+
         {s.runIds.length > 0 && (
           <div className="flex items-center gap-2 mb-4 text-[12px] text-faint flex-wrap">
             <Icon name="terminal" size={13} /> launched runs:
@@ -113,7 +120,7 @@ export default function AgentSessionPage() {
           {!inFlight && (
             <div className="text-[11px] text-faint mb-1.5 flex items-center gap-1.5">
               <Icon name="refresh" size={11} />
-              {s.status === "idle" ? "Paused — send a message to continue (the agent's thread is kept)."
+              {s.status === "done" ? "This turn is done — send a message to continue (the agent's thread is kept)."
                 : `Session ${s.status} — send a message to reactivate and continue it.`}
             </div>
           )}
