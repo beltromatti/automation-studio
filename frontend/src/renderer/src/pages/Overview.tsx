@@ -1,23 +1,27 @@
 import { Link } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
 import { RunRow } from "@/components/RunRow";
+import { WorkflowEditor } from "@/components/WorkflowEditor";
 import { jget } from "@/lib/client";
 import { useRuns } from "@/components/RunsProvider";
 import type { PublicWorkflow } from "@/lib/types";
 
 export default function Overview() {
   const [workflows, setWorkflows] = useState<PublicWorkflow[]>([]);
+  const [editing, setEditing] = useState(false);
   const { runs } = useRuns();
 
-  useEffect(() => {
+  const load = useCallback(() => {
     jget<{ workflows: PublicWorkflow[] }>("/api/workflows").then((d) => setWorkflows(d.workflows)).catch(() => {});
   }, []);
+  useEffect(() => { load(); }, [load]);
 
   return (
     <>
-      <Header title="Workflows" sub="Ready-to-run automation workflows" />
+      <Header title="Workflows" sub="Ready-to-run automations — built-in or your own"
+        actions={<button className="btn btn-primary btn-sm" onClick={() => setEditing(true)}><Icon name="plus" size={14} /> New workflow</button>} />
       <div className="px-7 py-6 max-w-[1100px]">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {workflows.map((w) => {
@@ -29,8 +33,11 @@ export default function Overview() {
                     <Icon name={w.icon} size={19} />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="text-[15px] font-semibold">{w.name}</h3>
+                      {!w.builtin && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#0072f518", color: "#3b9eff" }}>{w.createdBy === "agent" ? "agent-made" : "custom"}</span>
+                      )}
                       {w.needsAuth && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#f5a62318", color: "#f5a623" }}>uses login</span>
                       )}
@@ -62,6 +69,7 @@ export default function Overview() {
           </div>
         </div>
       </div>
+      {editing && <WorkflowEditor workflow="new" onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />}
     </>
   );
 }

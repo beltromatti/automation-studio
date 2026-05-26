@@ -464,7 +464,7 @@ class RunManager:
             self._log(run.id, f"[backend] attached to agent browser on :{run.attachPort} — launching workflow")
             self._save()
             csv = str(RUNS_DIR / run.id / "output.csv")
-            work_cmd = _self_base() + ["run-workflow", wf.module] + wf.build_argv(run.params) + \
+            work_cmd = _self_base() + ["run-workflow", wf.target] + wf.build_argv(run.params) + \
                 ["--server", f"http://127.0.0.1:{run.attachPort}", "-o", csv]
             work = await self._spawn(work_cmd)
             self.procs.setdefault(run.id, {})["work"] = work
@@ -509,7 +509,7 @@ class RunManager:
 
         # 2) workflow, attached to the server
         csv = str(RUNS_DIR / run.id / "output.csv")
-        work_cmd = _self_base() + ["run-workflow", wf.module] + wf.build_argv(run.params) + ["--server", f"http://127.0.0.1:{port}", "-o", csv]
+        work_cmd = _self_base() + ["run-workflow", wf.target] + wf.build_argv(run.params) + ["--server", f"http://127.0.0.1:{port}", "-o", csv]
         work = await self._spawn(work_cmd)
         self.procs.setdefault(run.id, {})["work"] = work
         asyncio.create_task(self._pump(run.id, work.stdout))

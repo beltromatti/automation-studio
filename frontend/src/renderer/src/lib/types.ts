@@ -38,6 +38,8 @@ export interface WorkflowDef {
   needsAuth?: boolean;
   params: WorkflowParam[];
   outputContract?: ContractColumn[]; // columns the result CSV carries
+  builtin?: boolean; // false for user/agent-authored workflows
+  createdBy?: string; // "builtin" | "user" | "agent"
   buildArgs: (p: Record<string, unknown>) => string[];
 }
 

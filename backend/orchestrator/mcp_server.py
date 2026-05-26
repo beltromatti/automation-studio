@@ -120,6 +120,17 @@ def t_dataset_project(a):
                                                   "name": a["name"], "dedupKeys": a.get("dedupKeys")})
 
 
+def t_create_workflow(a):
+    body = {k: a.get(k) for k in ("id", "name", "description", "code", "params", "outputContract",
+                                  "profile", "profileName", "needsAuth", "icon")}
+    body["createdBy"] = "agent"
+    return _api("POST", "/api/workflows", body)
+
+
+def t_workflow_source(a):
+    return _api("GET", f"/api/workflows/{a['workflowId']}/source")
+
+
 def t_run_workflow(a):
     profile = a.get("profileId") or AGENT_PROFILE_ID
     body = {"workflowId": a["workflowId"], "params": a.get("params", {}),
@@ -219,6 +230,14 @@ STUDIO_TOOLS = [
     ("studio_dataset_project", "Create a new dataset from selected/renamed columns of another (prep a tidy input for the next workflow). columns: [{from,to}] or [name].",
      {"type": "object", "properties": {"srcId": {"type": "string"}, "columns": {"type": "array"},
                                        "name": {"type": "string"}, "dedupKeys": {"type": "array"}}, "required": ["srcId", "columns", "name"]}, t_dataset_project),
+    ("studio_create_workflow", "Create (or update) a reusable workflow from Python code. The code must define main(argv) and should use `from automations import userkit` (userkit.parse(argv) -> params,server,output; userkit.run_session(fn,params,server); userkit.write_csv(output,rows,columns); userkit.progress/log/error). params: [{name,label,type:string|number|boolean|select,default,help,options}]. outputContract: [{name,type}]. profile: 'ephemeral'|'shared'. Appears in the app like a built-in (tagged 'agent').",
+     {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"},
+                                       "description": {"type": "string"}, "code": {"type": "string"},
+                                       "params": {"type": "array"}, "outputContract": {"type": "array"},
+                                       "profile": {"type": "string"}, "needsAuth": {"type": "boolean"},
+                                       "icon": {"type": "string"}}, "required": ["name", "code"]}, t_create_workflow),
+    ("studio_workflow_source", "Read the Python source of a user/agent workflow (to inspect or modify it).",
+     {"type": "object", "properties": {"workflowId": {"type": "string"}}, "required": ["workflowId"]}, t_workflow_source),
     ("studio_run_workflow", "Start a workflow run. Defaults to this agent's own profile. Optionally bind a datasetId to auto-append the result on success. Returns runId.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}, "params": {"type": "object"},
                                        "profileId": {"type": "string"}, "datasetId": {"type": "string"},

@@ -4,8 +4,19 @@ module follows the run-event protocol (automations/_events.py) and accepts
 """
 from __future__ import annotations
 
+import json
+import re
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
+
+from humanbrowser.config import data_dir
+
+# User/agent-authored workflows live under the (writable) data dir — NEVER in the
+# read-only app bundle — so they work identically in dev and packaged builds.
+USER_DIR = data_dir() / "workflows"
+USER_INDEX = USER_DIR / "workflows.json"
 
 
 @dataclass
@@ -36,6 +47,16 @@ class WorkflowDef:
     # text|number|boolean). Lets a Dataset adopt/validate the shape when a run is
     # captured into the data layer (Phase 2). Empty = inferred from the CSV header.
     output_contract: list[dict] = field(default_factory=list)
+    # Origin: built-ins ship in the bundle (module = dotted import path); user/agent
+    # workflows are files under the data dir (path set), differing only by a chip.
+    builtin: bool = True
+    path: str | None = None          # source .py file for user/agent workflows
+    created_by: str = "builtin"      # "builtin" | "user" | "agent"
+
+    @property
+    def target(self) -> str:
+        """What `run-workflow` should load: a file path (user) or dotted module."""
+        return self.path or self.module
 
 
 def _linkedin_argv(p: dict) -> list[str]:
@@ -141,8 +162,112 @@ WORKFLOWS: list[WorkflowDef] = [
 ]
 
 
+# ---------------------------------------------------------------- user/agent workflows
+def _user_argv(p: dict) -> list[str]:
+    """Generic calling convention for user/agent workflows: params as one JSON arg
+    (their main() reads it via automations.userkit.parse)."""
+    return ["--params-json", json.dumps(p)]
+
+
+def _def_from_meta(m: dict) -> WorkflowDef:
+    return WorkflowDef(
+        id=m["id"], name=m.get("name", m["id"]), description=m.get("description", ""),
+        icon=m.get("icon", "wand"), module=m.get("id"), profile=m.get("profile", "ephemeral"),
+        profile_name=m.get("profileName"), needs_auth=bool(m.get("needsAuth")),
+        params=[WorkflowParam(**{k: pp.get(k) for k in WorkflowParam.__dataclass_fields__ if k in pp})
+                for pp in m.get("params", [])],
+        output_contract=m.get("outputContract", []), build_argv=_user_argv,
+        builtin=False, created_by=m.get("createdBy", "user"),
+        path=str(USER_DIR / m["file"]),
+    )
+
+
+def _load_index() -> list[dict]:
+    try:
+        return json.loads(USER_INDEX.read_text()) if USER_INDEX.exists() else []
+    except Exception:
+        return []
+
+
+def load_user_workflows() -> list[WorkflowDef]:
+    out = []
+    for m in _load_index():
+        try:
+            if (USER_DIR / m["file"]).exists():
+                out.append(_def_from_meta(m))
+        except Exception:
+            continue
+    return out
+
+
+def all_workflows() -> list[WorkflowDef]:
+    """Built-ins + user/agent workflows (read fresh so new ones appear without a
+    backend restart — the registry is consulted per request)."""
+    return WORKFLOWS + load_user_workflows()
+
+
 def get_workflow(wid: str) -> WorkflowDef | None:
-    return next((w for w in WORKFLOWS if w.id == wid), None)
+    return next((w for w in all_workflows() if w.id == wid), None)
+
+
+_SLUG = re.compile(r"[^a-z0-9]+")
+
+
+def _slug(s: str) -> str:
+    return _SLUG.sub("-", (s or "").lower()).strip("-") or "workflow"
+
+
+def save_user_workflow(body: dict) -> dict:
+    """Create or update a user/agent workflow: validate the code compiles and has
+    main(), write the .py + index entry. Returns the public workflow."""
+    code = body.get("code", "")
+    if "def main(" not in code:
+        raise ValueError("workflow code must define a main(argv) function")
+    try:
+        compile(code, "<workflow>", "exec")
+    except SyntaxError as e:
+        raise ValueError(f"syntax error: {e}")
+    USER_DIR.mkdir(parents=True, exist_ok=True)
+    index = _load_index()
+    wid = body.get("id") or _slug(body.get("name", "workflow"))
+    # don't collide with a built-in id
+    if any(w.id == wid for w in WORKFLOWS):
+        wid = wid + "-user"
+    existing = next((m for m in index if m["id"] == wid), None)
+    file = (existing or {}).get("file") or f"{wid}.py"
+    (USER_DIR / file).write_text(code)
+    meta = {
+        "id": wid, "name": body.get("name", wid), "description": body.get("description", ""),
+        "icon": body.get("icon", "wand"), "profile": body.get("profile", "ephemeral"),
+        "profileName": body.get("profileName"), "needsAuth": bool(body.get("needsAuth")),
+        "params": body.get("params", []), "outputContract": body.get("outputContract", []),
+        "file": file, "createdBy": body.get("createdBy", "user"),
+        "createdAt": (existing or {}).get("createdAt") or time.time(), "updatedAt": time.time(),
+    }
+    index = [m for m in index if m["id"] != wid] + [meta]
+    USER_INDEX.write_text(json.dumps(index, indent=2))
+    return public_workflow(_def_from_meta(meta))
+
+
+def delete_user_workflow(wid: str) -> bool:
+    index = _load_index()
+    m = next((x for x in index if x["id"] == wid), None)
+    if not m:
+        return False
+    try:
+        (USER_DIR / m["file"]).unlink(missing_ok=True)
+    except Exception:
+        pass
+    USER_INDEX.write_text(json.dumps([x for x in index if x["id"] != wid], indent=2))
+    return True
+
+
+def user_workflow_source(wid: str) -> str | None:
+    m = next((x for x in _load_index() if x["id"] == wid), None)
+    if not m:
+        return None
+    p = USER_DIR / m["file"]
+    return p.read_text() if p.exists() else None
 
 
 def public_workflow(w: WorkflowDef) -> dict:
@@ -153,4 +278,5 @@ def public_workflow(w: WorkflowDef) -> dict:
         "needsAuth": w.needs_auth,
         "params": [vars(p) for p in w.params],
         "outputContract": w.output_contract,
+        "builtin": w.builtin, "createdBy": w.created_by,
     }

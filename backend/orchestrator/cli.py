@@ -52,8 +52,19 @@ def _run_workflow(argv: list[str]) -> int:
     if not argv:
         print("run-workflow: missing module", file=sys.stderr)
         return 2
-    module, rest = argv[0], argv[1:]
-    mod = importlib.import_module(module)
+    target, rest = argv[0], argv[1:]
+    # User/agent workflows are loaded from a .py file under the data dir; built-ins
+    # are dotted modules in the bundle.
+    if target.endswith(".py") or os.path.sep in target or os.path.exists(target):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("_user_workflow", target)
+        if not spec or not spec.loader:
+            print(f"run-workflow: cannot load {target}", file=sys.stderr)
+            return 2
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    else:
+        mod = importlib.import_module(target)
     return int(mod.main(rest) or 0)
 
 
