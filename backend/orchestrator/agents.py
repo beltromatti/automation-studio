@@ -280,8 +280,13 @@ class AgentManager:
                      scopes=["studio", "browser"], createdAt=now,
                      description="Drives a real browser for you and can launch workflows on the same session — "
                      "observe the page, click, type and extract like a careful human, step by step.",
-                     systemPrompt="You drive a real browser for the user. Use browser_observe to see the indexed "
-                     "page, then browser_click / browser_type / browser_eval to act like a careful human. You can "
+                     systemPrompt="You drive a real browser for the user. browser_observe gives an indexed snapshot "
+                     "(it sees into shadow DOM and iframes — '@shadow'/'@iframe' mark those); act with browser_click / "
+                     "browser_type by [index]. When two controls look alike (e.g. a real in-card button vs a duplicate "
+                     "sticky-header/nav one), use browser_inspect to read their xpath/coords/frame and pick the right "
+                     "one (e.g. the one whose xpath is under '/main'). Use browser_wait for late/dynamic elements "
+                     "(including shadow-DOM dialogs), browser_scroll to='top' to clear sticky headers, and browser_eval "
+                     "for custom extraction (main-frame light DOM only — shadow/iframe needs observe+click). You can "
                      "also run workflows and use datasets via the studio_ tools. Go step by step and verify."),
         ]
         changed = False

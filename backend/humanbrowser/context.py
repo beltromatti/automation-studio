@@ -108,6 +108,9 @@ class PageContext:
             "num_elements": self.num_elements,
             "truncated": self.truncated,
             "elements": self.elements,
+            # full ordered snapshot (interactive elements interleaved with text);
+            # additive — `elements` stays the element-only list for existing callers.
+            "nodes": self.nodes,
         }
 
 

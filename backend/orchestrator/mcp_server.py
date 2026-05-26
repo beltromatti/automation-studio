@@ -168,12 +168,206 @@ def t_wait_run(a):
     return {"status": "timeout", "note": "still running after timeout; check run_status later"}
 
 
+def t_list_runs(a):
+    runs = _api("GET", "/api/runs").get("runs", [])
+    runs = runs[: int(a.get("limit", 25))]
+    return [{k: r.get(k) for k in ("id", "workflowId", "workflowName", "status", "rows",
+                                   "profileId", "error", "createdAt") if r.get(k) is not None}
+            | {"progress": r.get("progress")} for r in runs]
+
+
+def t_run_logs(a):
+    d = _api("GET", f"/api/runs/{a['runId']}")
+    logs = d.get("logs") or []
+    tail = int(a.get("tail", 80))
+    return {"logs": logs[-tail:], "status": (d.get("run") or {}).get("status")}
+
+
+def t_cancel_run(a):
+    return _api("POST", f"/api/runs/{a['runId']}/cancel")
+
+
+def t_run_result(a):
+    return _api("GET", f"/api/runs/{a['runId']}/result")
+
+
+def t_run_to_dataset(a):
+    return _api("POST", f"/api/runs/{a['runId']}/to-dataset",
+                {k: a.get(k) for k in ("datasetId", "name", "dedupKeys") if a.get(k) is not None})
+
+
+# ---- datasets: full editing power (parity with the Data screen) -------------
+def t_dataset_rename(a):
+    return _api("POST", f"/api/datasets/{a['datasetId']}/rename", {"name": a["name"]})
+
+
+def t_dataset_delete(a):
+    return _api("DELETE", f"/api/datasets/{a['datasetId']}")
+
+
+def t_dataset_merge(a):
+    return _api("POST", "/api/datasets/merge", {"ids": a["ids"], "name": a.get("name", "Merged"),
+                                                "dedupKeys": a.get("dedupKeys")})
+
+
+def t_dataset_import(a):
+    return _api("POST", "/api/datasets/import", {"csv": a["csv"], "name": a.get("name", "Imported"),
+                                                 "datasetId": a.get("datasetId"), "dedupKeys": a.get("dedupKeys")})
+
+
+def t_dataset_update_cell(a):
+    return _api("POST", f"/api/datasets/{a['datasetId']}/cell",
+                {"rid": int(a["rowId"]), "column": a["column"], "value": a.get("value")})
+
+
+def t_dataset_delete_rows(a):
+    return _api("POST", f"/api/datasets/{a['datasetId']}/delete-rows", {"rids": a["rowIds"]})
+
+
+def t_dataset_add_column(a):
+    return _api("POST", f"/api/datasets/{a['datasetId']}/add-column",
+                {"display": a["name"], "type": a.get("type", "text")})
+
+
+def t_dataset_drop_column(a):
+    return _api("POST", f"/api/datasets/{a['datasetId']}/drop-column", {"display": a["name"]})
+
+
+def t_dataset_rename_column(a):
+    return _api("POST", f"/api/datasets/{a['datasetId']}/rename-column",
+                {"from": a["from"], "to": a["to"]})
+
+
+def t_dataset_set_dedup_keys(a):
+    return _api("POST", f"/api/datasets/{a['datasetId']}/dedup-keys", {"keys": a["keys"]})
+
+
+def t_dataset_dedup(a):
+    return _api("POST", f"/api/datasets/{a['datasetId']}/dedup", {"keys": a.get("keys")})
+
+
+# ---- profiles & workflows ----------------------------------------------------
+def t_list_profiles(_a):
+    items = _api("GET", "/api/profiles").get("profiles", [])
+    return [{k: p.get(k) for k in ("id", "name", "open", "openPort") if p.get(k) is not None} for p in items]
+
+
+def t_create_profile(a):
+    return _api("POST", "/api/profiles", {"name": a.get("name", "Profile")})
+
+
+def t_delete_workflow(a):
+    return _api("DELETE", f"/api/workflows/{a['workflowId']}")
+
+
+# The browser surface gives agents the SAME power as direct scripting against the
+# control server: observe() pierces shadow DOM AND same-origin iframes, and every
+# node carries index, tag, accessible name, attrs, inViewport, center [x,y], xpath
+# and frame ("" main / "/shadow…" / "/iframe…"). That metadata is what lets an
+# agent disambiguate look-alike controls (e.g. an in-card button under <main> vs a
+# duplicate sticky-header/nav one) and reach controls plain page JS can't (eval is
+# main-frame light-DOM only; the shadow-DOM invite dialog is only reachable via
+# observe+click by index). browser_observe shows a readable outline by default and
+# the full structured nodes on demand; browser_inspect zooms into matches.
+def _observe(max_nodes: int = 1200) -> dict:
+    return _ctrl("GET", f"/observe?format=json&max_nodes={int(max_nodes)}")
+
+
+def _frame_marker(frame: str) -> str:
+    f = frame or ""
+    tags = []
+    if "/iframe" in f:
+        tags.append("iframe")
+    if "/shadow" in f:
+        tags.append("shadow")
+    return f" @{'+'.join(tags)}" if tags else ""
+
+
+def _fmt_node(n: dict) -> str:
+    a = n.get("attrs") or {}
+    parts = []
+    for k in ("type", "role", "href", "value", "placeholder", "expanded", "selected", "checked", "disabled"):
+        if k in a:
+            v = a[k]
+            parts.append(k if v is True else f'{k}="{v}"')
+    attr = (" " + " ".join(parts)) if parts else ""
+    name = n.get("name") or ""
+    body = f" {name}" if name else ""
+    off = "" if n.get("inViewport", True) else " (offscreen)"
+    return f'[{n["index"]}]<{n.get("tag", "")}{attr}>{body}{_frame_marker(n.get("frame", ""))}{off}'
+
+
+def _outline(d: dict, max_chars: int = 14_000) -> str:
+    nodes = d.get("nodes") or d.get("elements") or []
+    header = (
+        f'URL: {d.get("url", "")}\nTITLE: {d.get("title", "")}\n'
+        f'SCROLL: y={d.get("scroll_y", 0)} of {d.get("scroll_height", 0)} '
+        f'{"[more below — scroll]" if d.get("has_more_below") else "[bottom]"}\n'
+        f'INTERACTIVE ELEMENTS: {d.get("num_elements", 0)}{" (truncated)" if d.get("truncated") else ""} '
+        f'— "@shadow"/"@iframe" mark elements reachable only via observe+click (not eval); '
+        f'"(offscreen)" = not in viewport. Use browser_inspect for xpath/coords to disambiguate.\n--- page ---\n'
+    )
+    lines = []
+    for n in nodes:
+        if n.get("type") == "element" or "index" in n:
+            lines.append(_fmt_node(n))
+        elif n.get("text"):
+            lines.append(n["text"])
+    body = "\n".join(l for l in lines if l)
+    if len(body) > max_chars:
+        body = body[:max_chars] + "\n… [snapshot truncated — browser_inspect to zoom, or raise maxNodes]"
+    return header + body
+
+
 def t_browser_goto(a):
     return _need_browser() or _ctrl("POST", "/goto", {"url": a["url"]})
 
 
-def t_browser_observe(_a):
-    return _need_browser() or _ctrl("GET", "/observe?format=text")
+def t_browser_observe(a):
+    err = _need_browser()
+    if err:
+        return err
+    d = _observe(int(a.get("maxNodes", 1200)))
+    if d.get("error"):
+        return d
+    if a.get("format") == "full":
+        return {k: d.get(k) for k in ("url", "title", "scroll_y", "scroll_height",
+                                      "has_more_below", "num_elements", "truncated")} | {"elements": d.get("elements")}
+    return _outline(d)
+
+
+def t_browser_inspect(a):
+    """Zoom into elements matching an accessible-name substring / tag / frame and
+    return full metadata (index, tag, name, attrs, inViewport, center, xpath,
+    frame) — the way to disambiguate look-alike controls and pick the right
+    [index] to click."""
+    err = _need_browser()
+    if err:
+        return err
+    d = _observe(int(a.get("maxNodes", 1200)))
+    if d.get("error"):
+        return d
+    match = (a.get("match") or "").lower()
+    tag = (a.get("tag") or "").lower()
+    frame = a.get("frame")  # None | "main" | "shadow" | "iframe"
+    out = []
+    for n in d.get("elements") or []:
+        nm = n.get("name") or ""
+        if match and match not in nm.lower():
+            continue
+        if tag and (n.get("tag") or "").lower() != tag:
+            continue
+        f = n.get("frame") or ""
+        if frame in ("main", "") and frame is not None and f != "":
+            continue
+        if frame == "shadow" and "/shadow" not in f:
+            continue
+        if frame == "iframe" and "/iframe" not in f:
+            continue
+        out.append({"index": n.get("index"), "tag": n.get("tag"), "name": nm,
+                    "attrs": n.get("attrs"), "inViewport": n.get("inViewport"),
+                    "center": n.get("center"), "xpath": n.get("xpath"), "frame": f})
+    return {"count": len(out), "matches": out}
 
 
 def t_browser_click(a):
@@ -191,7 +385,42 @@ def t_browser_press(a):
 
 
 def t_browser_scroll(a):
-    return _need_browser() or _ctrl("POST", "/act", {"action": "scroll", "dy": int(a.get("dy", 600))})
+    err = _need_browser()
+    if err:
+        return err
+    to = a.get("to")
+    if to == "top":
+        return _ctrl("POST", "/eval", {"script": "() => window.scrollTo(0, 0)"})
+    if to == "bottom":
+        return _ctrl("POST", "/eval", {"script": "() => window.scrollTo(0, document.documentElement.scrollHeight)"})
+    return _ctrl("POST", "/act", {"action": "scroll", "dy": int(a.get("dy", 600))})
+
+
+def t_browser_wait(a):
+    """Poll until an accessible-name substring (`match`, shadow/iframe-aware via
+    observe) or a main-frame CSS `selector` appears, or timeout. Returns the
+    matched element (with its current [index]) so you can act on it right away."""
+    err = _need_browser()
+    if err:
+        return err
+    match = (a.get("match") or "").lower()
+    selector = a.get("selector")
+    timeout = float(a.get("timeoutSec", 10))
+    deadline = time.time() + timeout
+    while True:
+        if selector:
+            r = _ctrl("POST", "/eval", {"script": f"() => !!document.querySelector({json.dumps(selector)})"})
+            if r.get("result") is True:
+                return {"found": True, "by": "selector", "selector": selector}
+        if match:
+            d = _observe()
+            for n in d.get("elements") or []:
+                if match in (n.get("name") or "").lower():
+                    return {"found": True, "by": "match", "index": n.get("index"), "name": n.get("name"),
+                            "frame": n.get("frame") or "", "inViewport": n.get("inViewport"), "xpath": n.get("xpath")}
+        if time.time() >= deadline:
+            return {"found": False, "timeoutSec": timeout}
+        time.sleep(0.6)
 
 
 def t_browser_read_text(_a):
@@ -217,7 +446,7 @@ STUDIO_TOOLS = [
      {"type": "object", "properties": {}}, t_list_datasets),
     ("studio_dataset_schema", "Get every dataset's physical SQL table name and columns, so you can write SQL for studio_query_data.",
      {"type": "object", "properties": {}}, t_dataset_schema),
-    ("studio_query_data", "Run a read-only SELECT/WITH query across the dataset tables (join/aggregate/filter).",
+    ("studio_query_data", "Run a read-only SELECT/WITH query across the dataset tables (join/aggregate/filter). Use the PHYSICAL table names (ds_<id>) and column names from studio_dataset_schema, not display names.",
      {"type": "object", "properties": {"sql": {"type": "string"}, "maxRows": {"type": "integer"}}, "required": ["sql"]}, t_query_data),
     ("studio_dataset_rows", "Read rows from a dataset (paginated, optional text search).",
      {"type": "object", "properties": {"datasetId": {"type": "string"}, "limit": {"type": "integer"},
@@ -248,25 +477,72 @@ STUDIO_TOOLS = [
      {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]}, t_run_status),
     ("studio_wait_run", "Block until a run reaches a terminal state (succeeded/failed/canceled) or the timeout, then return its status. Use this instead of polling.",
      {"type": "object", "properties": {"runId": {"type": "string"}, "timeoutSec": {"type": "integer"}}, "required": ["runId"]}, t_wait_run),
+    ("studio_list_runs", "List recent runs (most recent first) with status, row count and error — to see history or find a runId.",
+     {"type": "object", "properties": {"limit": {"type": "integer"}}}, t_list_runs),
+    ("studio_run_logs", "Read a run's log lines (the workflow's progress/log/error output) — use to diagnose a failed or stuck run.",
+     {"type": "object", "properties": {"runId": {"type": "string"}, "tail": {"type": "integer"}}, "required": ["runId"]}, t_run_logs),
+    ("studio_cancel_run", "Cancel a running/queued run.",
+     {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]}, t_cancel_run),
+    ("studio_run_result", "Read a finished run's result rows directly (the output CSV parsed to rows) without going through a dataset.",
+     {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]}, t_run_result),
+    ("studio_run_to_dataset", "Append a finished run's result into a dataset (new if no datasetId, else existing). The canonical way to capture a run's output into the persistent data layer.",
+     {"type": "object", "properties": {"runId": {"type": "string"}, "datasetId": {"type": "string"},
+                                       "name": {"type": "string"}, "dedupKeys": {"type": "array"}}, "required": ["runId"]}, t_run_to_dataset),
+    ("studio_dataset_rename", "Rename a dataset.",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "name": {"type": "string"}}, "required": ["datasetId", "name"]}, t_dataset_rename),
+    ("studio_dataset_delete", "Delete a dataset permanently.",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}}, "required": ["datasetId"]}, t_dataset_delete),
+    ("studio_dataset_merge", "Merge several datasets (by id) into one new dataset, union of columns, optional dedup keys.",
+     {"type": "object", "properties": {"ids": {"type": "array"}, "name": {"type": "string"}, "dedupKeys": {"type": "array"}}, "required": ["ids"]}, t_dataset_merge),
+    ("studio_dataset_import", "Create or append a dataset from raw CSV text (header row + rows). Use to bring external data into the data layer.",
+     {"type": "object", "properties": {"csv": {"type": "string"}, "name": {"type": "string"},
+                                       "datasetId": {"type": "string"}, "dedupKeys": {"type": "array"}}, "required": ["csv"]}, t_dataset_import),
+    ("studio_dataset_update_cell", "Set one cell's value. rowId is the row's `_rid` field from studio_dataset_rows; column is the display name.",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "rowId": {"type": "integer"},
+                                       "column": {"type": "string"}, "value": {}}, "required": ["datasetId", "rowId", "column"]}, t_dataset_update_cell),
+    ("studio_dataset_delete_rows", "Delete rows by their `_rid` values (from studio_dataset_rows).",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "rowIds": {"type": "array"}}, "required": ["datasetId", "rowIds"]}, t_dataset_delete_rows),
+    ("studio_dataset_add_column", "Add a column (type text|number|boolean).",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "name": {"type": "string"}, "type": {"type": "string"}}, "required": ["datasetId", "name"]}, t_dataset_add_column),
+    ("studio_dataset_drop_column", "Remove a column by display name.",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "name": {"type": "string"}}, "required": ["datasetId", "name"]}, t_dataset_drop_column),
+    ("studio_dataset_rename_column", "Rename a column (from display name -> to display name).",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"}}, "required": ["datasetId", "from", "to"]}, t_dataset_rename_column),
+    ("studio_dataset_set_dedup_keys", "Set the dataset's dedup key columns (display names).",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "keys": {"type": "array"}}, "required": ["datasetId", "keys"]}, t_dataset_set_dedup_keys),
+    ("studio_dataset_dedup", "Deduplicate a dataset now, by its dedup keys (or the keys you pass).",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "keys": {"type": "array"}}, "required": ["datasetId"]}, t_dataset_dedup),
+    ("studio_list_profiles", "List browser profiles (id, name, whether a login window is open). Use to pick a profileId for runs or to check which accounts are set up.",
+     {"type": "object", "properties": {}}, t_list_profiles),
+    ("studio_create_profile", "Create a new browser profile (a fresh, isolated logged-out browser identity).",
+     {"type": "object", "properties": {"name": {"type": "string"}}}, t_create_profile),
+    ("studio_delete_workflow", "Delete a user/agent-created workflow (built-ins can't be deleted).",
+     {"type": "object", "properties": {"workflowId": {"type": "string"}}, "required": ["workflowId"]}, t_delete_workflow),
 ]
 
 BROWSER_TOOLS = [
     ("browser_goto", "Navigate the owned browser to a URL.",
      {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}, t_browser_goto),
-    ("browser_observe", "Observe the current page: returns a compact, indexed snapshot of interactive elements + text. Use the [index] numbers with browser_click / browser_type.",
-     {"type": "object", "properties": {}}, t_browser_observe),
-    ("browser_click", "Click the element at the given [index] from browser_observe.",
+    ("browser_observe", "Observe the current page: an indexed snapshot of interactive elements + text, descending into shadow DOM and same-origin iframes. Each element shows its [index] (use with browser_click/browser_type), with '@shadow'/'@iframe' marking elements only reachable via observe+click (NOT browser_eval) and '(offscreen)' marking out-of-viewport ones. Pass format='full' to also get every element's xpath, center [x,y], frame and inViewport — use that (or browser_inspect) to tell look-alike controls apart (e.g. an in-card button under <main> vs a duplicate sticky-header one). maxNodes caps the snapshot (default 1200).",
+     {"type": "object", "properties": {"format": {"type": "string", "enum": ["outline", "full"]}, "maxNodes": {"type": "integer"}}}, t_browser_observe),
+    ("browser_inspect", "Zoom into elements whose accessible name contains `match` (and/or a `tag`, and/or `frame`=main|shadow|iframe) and return full metadata for each: index, tag, name, attrs, inViewport, center [x,y], xpath, frame. The way to disambiguate duplicate/look-alike controls and pick the right [index] before clicking (e.g. choose the Connect whose xpath contains '/main', not the sticky-header twin).",
+     {"type": "object", "properties": {"match": {"type": "string"}, "tag": {"type": "string"},
+                                       "frame": {"type": "string", "enum": ["main", "shadow", "iframe"]},
+                                       "maxNodes": {"type": "integer"}}}, t_browser_inspect),
+    ("browser_click", "Click the element at the given [index] from the most recent browser_observe/browser_inspect/browser_wait.",
      {"type": "object", "properties": {"index": {"type": "integer"}}, "required": ["index"]}, t_browser_click),
     ("browser_type", "Type into the element at [index]. Set enter=true to submit, clear=true to clear first.",
      {"type": "object", "properties": {"index": {"type": "integer"}, "text": {"type": "string"},
                                        "enter": {"type": "boolean"}, "clear": {"type": "boolean"}}, "required": ["index", "text"]}, t_browser_type),
     ("browser_press", "Press a key (e.g. Enter, Escape, ArrowDown).",
      {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}, t_browser_press),
-    ("browser_scroll", "Scroll the page by dy pixels (default 600).",
-     {"type": "object", "properties": {"dy": {"type": "integer"}}}, t_browser_scroll),
+    ("browser_scroll", "Scroll the page. Either by dy pixels (default 600) or to='top'|'bottom'. Scrolling to top is useful to dissolve sticky headers before acting.",
+     {"type": "object", "properties": {"dy": {"type": "integer"}, "to": {"type": "string", "enum": ["top", "bottom"]}}}, t_browser_scroll),
+    ("browser_wait", "Poll until an element appears (or timeout): `match` = accessible-name substring (shadow/iframe-aware, via observe), or `selector` = a main-frame CSS selector. Returns the matched element with its current [index]. Use to wait for late/dynamic content like a dialog that renders in shadow DOM.",
+     {"type": "object", "properties": {"match": {"type": "string"}, "selector": {"type": "string"}, "timeoutSec": {"type": "number"}}}, t_browser_wait),
     ("browser_read_text", "Get the full visible text of the current page.",
      {"type": "object", "properties": {}}, t_browser_read_text),
-    ("browser_eval", "Evaluate a JavaScript expression/function in the page and return the result. Full flexibility for custom extraction.",
+    ("browser_eval", "Evaluate a JavaScript function in the page (main frame, light DOM) and return the result — full flexibility for custom extraction or clicks. NOTE: main-frame JS cannot see shadow-DOM or cross-origin iframe content; for those use browser_observe/browser_inspect + browser_click by [index].",
      {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]}, t_browser_eval),
     ("browser_screenshot", "Take a screenshot of the current page; returns the file path.",
      {"type": "object", "properties": {}}, t_browser_screenshot),
