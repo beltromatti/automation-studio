@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { Icon } from "./Icon";
 import { jget, jpost } from "@/lib/client";
-import type { Profile, PublicWorkflow, Run } from "@/lib/types";
+import type { Dataset, Profile, PublicWorkflow, Run } from "@/lib/types";
 
 export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const navigate = useNavigate();
@@ -19,6 +19,9 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   // Workflows that use a login default to the profile they were built around (id
   // "default" today); everything else starts on the throwaway Ephemeral profile.
   const [profileId, setProfileId] = useState<string>(workflow.needsAuth ? "default" : "ephemeral");
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [dest, setDest] = useState<string>(""); // "" none | dataset id | "__new__"
+  const [newDsName, setNewDsName] = useState(`${workflow.name} results`);
 
   useEffect(() => {
     jget<{ profiles: Profile[] }>("/api/profiles")
@@ -31,6 +34,7 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
         );
       })
       .catch(() => {});
+    jget<{ datasets: Dataset[] }>("/api/datasets").then((d) => setDatasets(d.datasets)).catch(() => {});
   }, []);
 
   const selected = profiles.find((p) => p.id === profileId);
@@ -39,7 +43,17 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
     setBusy(true);
     setError("");
     try {
-      const { run } = await jpost<{ run: Run }>("/api/runs", { workflowId: workflow.id, params: values, watch, profileId });
+      let datasetId: string | undefined;
+      if (dest === "__new__") {
+        const { dataset } = await jpost<{ dataset: Dataset }>("/api/datasets", {
+          name: newDsName.trim() || `${workflow.name} results`,
+          columns: workflow.outputContract ?? [],
+        });
+        datasetId = dataset.id;
+      } else if (dest) {
+        datasetId = dest;
+      }
+      const { run } = await jpost<{ run: Run }>("/api/runs", { workflowId: workflow.id, params: values, watch, profileId, datasetId });
       navigate(`/runs/${run.id}`);
     } catch (e) {
       setError(String((e as Error).message));
@@ -120,6 +134,29 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
               </>
             )}
           </span>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label className="label">Append results to dataset <span className="text-faint">(optional)</span></label>
+          <div className="relative flex items-center">
+            <span className="absolute left-3 pointer-events-none text-faint"><Icon name="database" size={14} /></span>
+            <select className="input appearance-none" style={{ paddingLeft: 32 }} value={dest} onChange={(e) => setDest(e.target.value)}>
+              <option value="">— don't capture (results stay on the run) —</option>
+              <option value="__new__">＋ New dataset…</option>
+              {datasets.map((d) => (
+                <option key={d.id} value={d.id}>{d.name} ({d.rowCount ?? 0} rows)</option>
+              ))}
+            </select>
+            <Icon name="chevronRight" size={14} className="absolute right-3 rotate-90 pointer-events-none text-faint" />
+          </div>
+          {dest === "__new__" && (
+            <input className="input mt-1" placeholder="New dataset name" value={newDsName} onChange={(e) => setNewDsName(e.target.value)} />
+          )}
+          {dest && (
+            <span className="text-[11px] text-faint">
+              On success the result is appended to {dest === "__new__" ? "a new dataset" : "the selected dataset"} (deduped by its key). Build up leads across runs, then project an input for the next workflow.
+            </span>
+          )}
         </div>
 
         <label className="flex items-center gap-2.5 mt-1 cursor-pointer select-none" onClick={() => setWatch((w) => !w)}>

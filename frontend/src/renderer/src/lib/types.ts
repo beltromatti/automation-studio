@@ -20,6 +20,13 @@ export interface WorkflowParam {
   options?: { value: string; label: string }[]; // for "select"
 }
 
+export type ColumnType = "text" | "number" | "boolean";
+
+export interface ContractColumn {
+  name: string;
+  type: ColumnType;
+}
+
 export interface WorkflowDef {
   id: string;
   name: string;
@@ -30,6 +37,7 @@ export interface WorkflowDef {
   profileName?: string; // for shared profiles (e.g. "default")
   needsAuth?: boolean;
   params: WorkflowParam[];
+  outputContract?: ContractColumn[]; // columns the result CSV carries
   buildArgs: (p: Record<string, unknown>) => string[];
 }
 
@@ -67,6 +75,44 @@ export interface Run {
 
 export interface Settings {
   maxConcurrency: number;
+}
+
+// ---- Datasets: the persistent, cross-run SQLite data layer --------------------
+export interface DatasetColumn {
+  display: string; // user-facing name
+  name: string; // physical SQL column name (for agent SQL)
+  type: ColumnType;
+}
+
+export interface DatasetSource {
+  kind: "manual" | "import" | "run" | "project" | "merge";
+  runId?: string;
+  workflow?: string;
+  file?: string;
+  from?: string | string[];
+}
+
+export interface Dataset {
+  id: string;
+  name: string;
+  table: string; // physical table name (for SQL)
+  columns: DatasetColumn[];
+  dedupKeys: string[]; // display names used to skip duplicates on append
+  source: DatasetSource | null;
+  rowCount: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DatasetRow {
+  _rid: number;
+  [col: string]: unknown;
+}
+
+export interface DatasetRows {
+  columns: DatasetColumn[];
+  rows: DatasetRow[];
+  count: number;
 }
 
 // A browser profile: a self-contained, persistent browser environment (cookies,

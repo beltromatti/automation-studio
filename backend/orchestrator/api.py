@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, FileResponse
 
 from .manager import get_manager
 from .registry import WORKFLOWS, public_workflow
+from . import datastore
 
 
 @asynccontextmanager
@@ -54,7 +55,7 @@ def create_app() -> FastAPI:
         mgr = get_manager()
         try:
             run = mgr.create(body["workflowId"], body.get("params") or {}, bool(body.get("watch")),
-                             body.get("profileId") or "ephemeral")
+                             body.get("profileId") or "ephemeral", body.get("datasetId"))
             return {"run": mgr.get(run.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
@@ -97,6 +98,26 @@ def create_app() -> FastAPI:
         name = f"{run['workflowId'] if run else 'run'}-{rid}.csv"
         return FileResponse(str(path), media_type="text/csv", filename=name)
 
+    @app.post("/api/runs/{rid}/to-dataset")
+    async def run_to_dataset(rid: str, body: dict = Body(...)):
+        """Append a finished run's result into a Dataset (new or existing). The
+        canonical way to capture a run's output into the persistent data layer."""
+        mgr = get_manager()
+        run = mgr.get(rid)
+        if not run:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        path = mgr.get_result_path(rid)
+        if not path.exists():
+            return JSONResponse({"error": "this run has no result"}, status_code=404)
+        name = body.get("name") or f"{run['workflowName']} — {rid}"
+        from .registry import get_workflow
+        wf = get_workflow(run["workflowId"])
+        res = datastore.ingest_csv(path, target_id=body.get("datasetId"), name=name,
+                                   dedup_keys=body.get("dedupKeys"),
+                                   source={"kind": "run", "runId": rid, "workflow": run["workflowId"]},
+                                   columns=(wf.output_contract if wf else None))
+        return res
+
     @app.get("/api/settings")
     async def get_settings():
         return get_manager().get_settings()
@@ -104,6 +125,120 @@ def create_app() -> FastAPI:
     @app.post("/api/settings")
     async def set_settings(body: dict = Body(...)):
         return get_manager().set_settings(body)
+
+    # ---------------------------------------------------------------- datasets
+    # Static collection routes are declared before the dynamic /{did} routes.
+    @app.get("/api/datasets")
+    async def datasets_list():
+        return {"datasets": datastore.list_datasets()}
+
+    @app.post("/api/datasets")
+    async def datasets_create(body: dict = Body(...)):
+        ds = datastore.create_dataset(body.get("name", "Untitled"), body.get("columns") or [],
+                                      body.get("dedupKeys"), body.get("source"), body.get("rows"))
+        return {"dataset": ds}
+
+    @app.post("/api/datasets/project")
+    async def datasets_project(body: dict = Body(...)):
+        ds = datastore.project(body["srcId"], body.get("columns") or [], body.get("name", "Projection"),
+                               body.get("dedupKeys"))
+        return {"dataset": ds} if ds else JSONResponse({"error": "could not project"}, status_code=400)
+
+    @app.post("/api/datasets/merge")
+    async def datasets_merge(body: dict = Body(...)):
+        ds = datastore.merge(body.get("ids") or [], body.get("name", "Merged"), body.get("dedupKeys"))
+        return {"dataset": ds} if ds else JSONResponse({"error": "could not merge"}, status_code=400)
+
+    @app.post("/api/datasets/import")
+    async def datasets_import(body: dict = Body(...)):
+        import tempfile, os as _os
+        text = body.get("csv") or ""
+        fd, tmp = tempfile.mkstemp(suffix=".csv")
+        try:
+            with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            res = datastore.ingest_csv(tmp, target_id=body.get("datasetId"),
+                                       name=body.get("name", "Imported"), dedup_keys=body.get("dedupKeys"))
+        finally:
+            try: _os.remove(tmp)
+            except OSError: pass
+        return res
+
+    @app.post("/api/datasets/query")
+    async def datasets_query(body: dict = Body(...)):
+        return datastore.query(body.get("sql", ""), int(body.get("maxRows", 5000)))
+
+    @app.get("/api/datasets/schema")
+    async def datasets_schema():
+        return {"schema": datastore.schema_summary()}
+
+    @app.get("/api/datasets/{did}")
+    async def dataset_get(did: str):
+        ds = datastore.get_dataset(did)
+        return {"dataset": ds} if ds else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.post("/api/datasets/{did}/rename")
+    async def dataset_rename(did: str, body: dict = Body(...)):
+        ds = datastore.rename_dataset(did, body.get("name", ""))
+        return {"dataset": ds} if ds else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.delete("/api/datasets/{did}")
+    async def dataset_delete(did: str):
+        return {"ok": datastore.delete_dataset(did)}
+
+    @app.get("/api/datasets/{did}/rows")
+    async def dataset_rows(did: str, limit: int = 200, offset: int = 0, search: str = "",
+                           sort: str | None = None, direction: str = "asc"):
+        return datastore.get_rows(did, limit, offset, search, sort, direction)
+
+    @app.post("/api/datasets/{did}/rows")
+    async def dataset_add_rows(did: str, body: dict = Body(...)):
+        if "values" in body:
+            return datastore.insert_row(did, body["values"])
+        return datastore.append_rows(did, body.get("rows") or [], bool(body.get("dedup", True)),
+                                     bool(body.get("extend", False)))
+
+    @app.post("/api/datasets/{did}/cell")
+    async def dataset_cell(did: str, body: dict = Body(...)):
+        ok = datastore.update_cell(did, int(body["rid"]), body["column"], body.get("value"))
+        return {"ok": ok}
+
+    @app.post("/api/datasets/{did}/delete-rows")
+    async def dataset_delete_rows(did: str, body: dict = Body(...)):
+        return {"removed": datastore.delete_rows(did, body.get("rids") or [])}
+
+    @app.post("/api/datasets/{did}/add-column")
+    async def dataset_add_column(did: str, body: dict = Body(...)):
+        ds = datastore.add_column(did, body["display"], body.get("type", "text"))
+        return {"dataset": ds} if ds else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.post("/api/datasets/{did}/drop-column")
+    async def dataset_drop_column(did: str, body: dict = Body(...)):
+        ds = datastore.drop_column(did, body["display"])
+        return {"dataset": ds} if ds else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.post("/api/datasets/{did}/rename-column")
+    async def dataset_rename_column(did: str, body: dict = Body(...)):
+        ds = datastore.rename_column(did, body["from"], body["to"])
+        return {"dataset": ds} if ds else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.post("/api/datasets/{did}/dedup-keys")
+    async def dataset_dedup_keys(did: str, body: dict = Body(...)):
+        ds = datastore.set_dedup_keys(did, body.get("keys") or [])
+        return {"dataset": ds} if ds else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.post("/api/datasets/{did}/dedup")
+    async def dataset_dedup(did: str, body: dict = Body(...)):
+        return datastore.dedup(did, body.get("keys"))
+
+    @app.get("/api/datasets/{did}/export")
+    async def dataset_export(did: str):
+        ds = datastore.get_dataset(did)
+        path = datastore.export_csv(did)
+        if not path:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        safe = (ds["name"] if ds else did).replace("/", "-")
+        return FileResponse(str(path), media_type="text/csv", filename=f"{safe}.csv")
 
     # ---------------------------------------------------------------- profiles
     @app.get("/api/profiles")

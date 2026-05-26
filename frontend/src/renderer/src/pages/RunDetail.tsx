@@ -6,6 +6,7 @@ import { StatusPill } from "@/components/StatusPill";
 import { ProgressBar } from "@/components/ProgressBar";
 import { LogView } from "@/components/LogView";
 import { CsvTable } from "@/components/CsvTable";
+import { CaptureToDataset } from "@/components/CaptureToDataset";
 import { RunControls } from "@/components/RunControls";
 import { useRuns } from "@/components/RunsProvider";
 import { jget, duration, timeAgo } from "@/lib/client";
@@ -127,7 +128,12 @@ export default function RunDetail() {
 
         {showResults && (
           <div>
-            <div className="flex items-center gap-2 mb-2.5 text-[13px] font-medium"><Icon name="layers" size={15} /> Results</div>
+            <div className="flex items-center gap-2 mb-2.5 flex-wrap">
+              <span className="flex items-center gap-2 text-[13px] font-medium"><Icon name="layers" size={15} /> Results</span>
+              {(run.rows ?? 0) > 0 && (
+                <div className="ml-auto"><CaptureToDataset runId={run.id} defaultName={`${run.workflowName} — ${run.id}`} /></div>
+              )}
+            </div>
             <CsvTable runId={run.id} />
           </div>
         )}

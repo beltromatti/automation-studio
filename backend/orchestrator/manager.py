@@ -100,6 +100,7 @@ class Run:
     rows: int | None = None
     error: str | None = None
     serverPort: int | None = None
+    datasetId: str | None = None  # optional: append this run's result here on success
 
 
 class RunManager:
@@ -301,7 +302,7 @@ class RunManager:
         return self.settings
 
     def create(self, workflow_id: str, params: dict, watch: bool = False,
-               profile_id: str = "ephemeral") -> Run:
+               profile_id: str = "ephemeral", dataset_id: str | None = None) -> Run:
         from .registry import get_workflow
         from . import profiles
         wf = get_workflow(workflow_id)
@@ -320,7 +321,8 @@ class RunManager:
         rid = uuid.uuid4().hex[:8]
         run = Run(id=rid, workflowId=workflow_id, workflowName=wf.name, params=params,
                   status="queued", watch=bool(watch), createdAt=time.time(),
-                  profileKey=profile_id, profileId=profile_id, profileName=profile_name)
+                  profileKey=profile_id, profileId=profile_id, profileName=profile_name,
+                  datasetId=dataset_id or None)
         self.runs[rid] = run
         (RUNS_DIR / rid).mkdir(parents=True, exist_ok=True)
         self._save()
@@ -555,6 +557,18 @@ class RunManager:
         elif code == 0 and csv.exists():
             run.status = "succeeded"; run.csvPath = str(csv)
             self._log(run.id, f"[backend] done — {run.rows if run.rows is not None else '?'} rows")
+            if run.datasetId:
+                try:
+                    from . import datastore
+                    from .registry import get_workflow
+                    _wf = get_workflow(run.workflowId)
+                    res = datastore.ingest_csv(csv, target_id=run.datasetId,
+                                               source={"kind": "run", "runId": run.id, "workflow": run.workflowId},
+                                               columns=(_wf.output_contract if _wf else None))
+                    self._log(run.id, f"[backend] → dataset {run.datasetId}: +{res.get('inserted',0)} rows "
+                                      f"({res.get('skipped',0)} dup skipped)")
+                except Exception as e:
+                    self._log(run.id, f"[backend] dataset append failed: {e}")
             await self.shutdown_server(run)
         else:
             run.status = "failed"

@@ -6,6 +6,8 @@ import WorkflowPage from "@/pages/WorkflowPage";
 import RunsPage from "@/pages/RunsPage";
 import RunDetail from "@/pages/RunDetail";
 import ProfilesPage from "@/pages/ProfilesPage";
+import DatasetsPage from "@/pages/DatasetsPage";
+import DatasetPage from "@/pages/DatasetPage";
 
 export default function App() {
   return (
@@ -18,6 +20,8 @@ export default function App() {
             <Route path="/workflows/:id" element={<WorkflowPage />} />
             <Route path="/runs" element={<RunsPage />} />
             <Route path="/runs/:id" element={<RunDetail />} />
+            <Route path="/data" element={<DatasetsPage />} />
+            <Route path="/data/:id" element={<DatasetPage />} />
             <Route path="/profiles" element={<ProfilesPage />} />
           </Routes>
         </main>

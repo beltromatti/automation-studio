@@ -32,6 +32,10 @@ class WorkflowDef:
     profile_name: str | None = None
     needs_auth: bool = False
     params: list[WorkflowParam] = field(default_factory=list)
+    # The columns this workflow's CSV result carries (name + logical type:
+    # text|number|boolean). Lets a Dataset adopt/validate the shape when a run is
+    # captured into the data layer (Phase 2). Empty = inferred from the CSV header.
+    output_contract: list[dict] = field(default_factory=list)
 
 
 def _linkedin_argv(p: dict) -> list[str]:
@@ -78,6 +82,11 @@ WORKFLOWS: list[WorkflowDef] = [
                           help="How many organic results to collect (paginates as needed)."),
         ],
         build_argv=lambda p: [str(p.get("query", "")), "-n", str(int(p.get("numResults", 10) or 10))],
+        output_contract=[
+            {"name": "rank", "type": "number"}, {"name": "title", "type": "text"},
+            {"name": "url", "type": "text"}, {"name": "host", "type": "text"},
+            {"name": "snippet", "type": "text"},
+        ],
     ),
     WorkflowDef(
         id="linkedin-people",
@@ -117,6 +126,17 @@ WORKFLOWS: list[WorkflowDef] = [
                           help="Target number of profiles (paginates as needed)."),
         ],
         build_argv=_linkedin_argv,
+        output_contract=[
+            {"name": "rank", "type": "number"}, {"name": "name", "type": "text"},
+            {"name": "profile_url", "type": "text"}, {"name": "degree", "type": "text"},
+            {"name": "headline", "type": "text"}, {"name": "location", "type": "text"},
+            {"name": "connections", "type": "text"}, {"name": "followers", "type": "text"},
+            {"name": "current_company", "type": "text"}, {"name": "education", "type": "text"},
+            {"name": "about", "type": "text"}, {"name": "open_to_work", "type": "text"},
+            {"name": "verified", "type": "text"}, {"name": "premium", "type": "text"},
+            {"name": "contact_info", "type": "text"}, {"name": "services", "type": "text"},
+            {"name": "extra", "type": "text"},
+        ],
     ),
 ]
 
@@ -132,4 +152,5 @@ def public_workflow(w: WorkflowDef) -> dict:
         "module": w.module, "profile": w.profile, "profileName": w.profile_name,
         "needsAuth": w.needs_auth,
         "params": [vars(p) for p in w.params],
+        "outputContract": w.output_contract,
     }
