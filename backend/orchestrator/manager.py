@@ -115,6 +115,8 @@ class RunManager:
         self.logs: dict[str, list[str]] = {}
         self.flags: dict[str, dict] = {}  # id -> {canceled, takingControl}
         self.sessions: dict[str, dict] = {}  # profileId -> {proc, port} (manual open sessions)
+        self.agent_browsers: dict[str, dict] = {}  # agent session id -> {proc, port, pid} (agent-owned)
+        self._acquiring: set[str] = set()  # persistent profile ids being claimed right now (race guard)
         self.settings = {"maxConcurrency": 1}
         self._http: aiohttp.ClientSession | None = None
         self._reaper_task: asyncio.Task | None = None
@@ -150,7 +152,76 @@ class RunManager:
         for s in self.sessions.values():
             if s.get("proc"):
                 kill_tree(s["proc"].pid)
+        for b in self.agent_browsers.values():
+            if b.get("proc"):
+                kill_tree(b["proc"].pid)
         self.reap_strays(startup=True)
+
+    # ------------------------------------------------------------------ profile gate
+    # A persistent profile is used by AT MOST ONE owner at a time, across runs,
+    # manual login sessions AND agent-owned browsers. Everything consults this one
+    # predicate so they queue for each other instead of colliding.
+    def _persistent_profile_busy(self, pid: str) -> bool:
+        if is_ephemeral(pid):
+            return False
+        if pid in self.sessions:                       # a manual login window
+            return True
+        if pid in self._acquiring:                     # an owner mid-acquire (race guard)
+            return True
+        if any(b.get("pid") == pid for b in self.agent_browsers.values()):  # an agent owns it
+            return True
+        return any(r.status in ACTIVE and r.profileId == pid and not r.attachPort
+                   for r in self.runs.values())        # an active (non-attached) run
+
+    def claim_profile(self, pid: str) -> bool:
+        """Atomically (single event-loop step, no await) claim a free persistent
+        profile. Returns False if it's busy. Pair with unclaim_profile/open."""
+        if self._persistent_profile_busy(pid):
+            return False
+        self._acquiring.add(pid)
+        return True
+
+    def unclaim_profile(self, pid: str) -> None:
+        self._acquiring.discard(pid)
+
+    async def open_agent_browser(self, sid: str, pid: str, headed: bool) -> dict:
+        """Open a control-server on a persistent profile's master dir, owned by an
+        agent session. Caller must have claim_profile()'d ``pid`` first."""
+        from . import profiles
+        port = self._alloc_port()
+        profiles.clear_locks(pid)
+        master = str(profiles.master_dir(pid))
+        cmd = _self_base() + ["control-server", "--port", str(port), "--profile", master]
+        if not headed:
+            cmd.append("--headless")
+        proc = await self._spawn(cmd)
+        self.agent_browsers[sid] = {"proc": proc, "port": port, "pid": pid}
+        if not await self._wait_ready(port, 25):
+            kill_tree(proc.pid)
+            self.agent_browsers.pop(sid, None)
+            return {"ok": False, "error": "browser failed to start"}
+        profiles.touch(pid)
+        return {"ok": True, "port": port}
+
+    async def release_agent_browser(self, sid: str) -> None:
+        """Close an agent-owned control-server gracefully (flush the profile DBs +
+        free the lock), then let queued runs/agents proceed."""
+        from . import profiles
+        b = self.agent_browsers.pop(sid, None)
+        if not b:
+            return
+        try:
+            await self._server_post(b["port"], "/shutdown")
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(b["proc"].wait(), timeout=10)
+        except Exception:
+            pass
+        kill_tree(b["proc"].pid)
+        if not is_ephemeral(b["pid"]):
+            profiles.clear_locks(b["pid"])
+        self.schedule()  # a queued run/agent on this profile can now start
 
     # ------------------------------------------------------------------ profile sessions
     async def open_profile_session(self, pid: str) -> dict:
@@ -162,9 +233,9 @@ class RunManager:
             return {"ok": False, "error": "unknown profile"}
         if pid in self.sessions:
             return {"ok": True, "port": self.sessions[pid]["port"]}
-        # one session at a time per profile: refuse if a run is using it right now
-        if any(r.status in ACTIVE and r.profileId == pid for r in self.runs.values()):
-            return {"ok": False, "error": "profile is busy with a run — wait for it to finish"}
+        # one owner at a time per profile: refuse if a run or an agent is using it
+        if self._persistent_profile_busy(pid):
+            return {"ok": False, "error": "profile is busy (a run or an agent is using it) — wait for it to finish"}
         port = self._alloc_port()
         profiles.clear_locks(pid)  # also mkdir's the master + drops any stale lock
         master = str(profiles.master_dir(pid))
@@ -403,12 +474,13 @@ class RunManager:
         - **ephemeral** runs (and runs on *different* profiles) run in parallel,
           bounded only by a machine-safety ceiling on simultaneous browsers.
         """
-        # profiles occupied right now (by an active run or an open login session)
-        busy = set(self.sessions.keys())
+        # profiles occupied right now (by an active run, a manual login session, an
+        # agent-owned browser, or an owner mid-acquire)
+        busy = set(self.sessions.keys()) | set(self._acquiring) | {b["pid"] for b in self.agent_browsers.values()}
         for r in self.runs.values():
             if r.status in ACTIVE and not is_ephemeral(r.profileId) and not r.attachPort:
                 busy.add(r.profileId)
-        live = sum(1 for r in self.runs.values() if r.status in ACTIVE) + len(self.sessions)
+        live = sum(1 for r in self.runs.values() if r.status in ACTIVE) + len(self.sessions) + len(self.agent_browsers)
         queued = sorted((r for r in self.runs.values() if r.status == "queued"), key=lambda r: r.createdAt)
         started = False
         for run in queued:

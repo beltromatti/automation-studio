@@ -6,10 +6,10 @@ import { jget, jpost, duration, timeAgo } from "@/lib/client";
 import type { AgentEvent, AgentSession } from "@/lib/types";
 
 const STATUS_COLOR: Record<string, string> = {
-  starting: "#3b9eff", running: "#3b9eff", idle: "#f5a623",
+  starting: "#3b9eff", queued: "#9aa0a6", running: "#3b9eff", idle: "#f5a623",
   done: "#2bd576", failed: "#ff5c5c", canceled: "#6e6e6e",
 };
-const TERMINAL = ["done", "failed", "canceled"];
+const IN_FLIGHT = ["starting", "queued", "running"]; // a turn is running (or waiting for a profile)
 
 function unwrap(result?: string): string {
   if (!result) return "";
@@ -33,7 +33,7 @@ export default function AgentSessionPage() {
     try {
       const d = await jget<{ session: AgentSession; events: AgentEvent[] }>(`/api/agents/sessions/${id}`);
       setS(d.session); setEvents(d.events);
-      liveRef.current = !TERMINAL.includes(d.session.status);
+      liveRef.current = IN_FLIGHT.includes(d.session.status);
     } catch {}
   }, [id]);
 
@@ -42,8 +42,7 @@ export default function AgentSessionPage() {
     const loop = async () => {
       if (stop || document.visibilityState !== "visible") return;
       await refresh();
-      const active = s?.status === "running" || s?.status === "starting";
-      if (!stop) setTimeout(loop, active ? 1200 : liveRef.current ? 3000 : 8000);
+      if (!stop) setTimeout(loop, liveRef.current ? 1200 : 6000);
     };
     loop();
     return () => { stop = true; };
@@ -64,7 +63,7 @@ export default function AgentSessionPage() {
   if (!s) return (<><Header title="…" /><div className="px-7 py-6 text-faint text-[13px]">Loading agent session…</div></>);
 
   const c = STATUS_COLOR[s.status] ?? "#6e6e6e";
-  const active = s.status === "running" || s.status === "starting";
+  const inFlight = IN_FLIGHT.includes(s.status);
   const usage = s.usage as Record<string, number> | null;
   const cost = usage?.total_cost_usd;
   const inTok = usage?.input_tokens; const outTok = usage?.output_tokens;
@@ -76,7 +75,7 @@ export default function AgentSessionPage() {
         actions={
           <>
             {s.controlPort && <span className="text-[11px] px-2 py-1 rounded-md" style={{ background: "#f5a62312", color: "#f5a623" }}><Icon name="globe" size={12} /> browser :{s.controlPort}</span>}
-            {!TERMINAL.includes(s.status) && <button className="btn btn-danger btn-sm" disabled={busy} onClick={stop}><Icon name="square" size={13} /> Stop</button>}
+            {inFlight && <button className="btn btn-danger btn-sm" disabled={busy} onClick={stop}><Icon name="square" size={13} /> Stop</button>}
           </>
         }
       />
@@ -92,7 +91,7 @@ export default function AgentSessionPage() {
             {s.turns} turn{s.turns !== 1 ? "s" : ""}
             {inTok != null && ` · ${(inTok / 1000).toFixed(1)}k in / ${((outTok ?? 0) / 1000).toFixed(1)}k out`}
             {cost != null && ` · $${cost.toFixed(4)}`}
-            {` · ${active ? duration(s.startedAt) : timeAgo(s.createdAt)}`}
+            {` · ${inFlight ? duration(s.startedAt) : timeAgo(s.createdAt)}`}
           </span>
         </div>
 
@@ -108,17 +107,26 @@ export default function AgentSessionPage() {
           <div ref={endRef} />
         </div>
 
-        {!TERMINAL.includes(s.status) && (
-          <div className="sticky bottom-0 mt-4 pt-3 bg-bg/90 backdrop-blur">
-            <div className="flex items-end gap-2">
-              <textarea className="input" style={{ height: 44, padding: "11px 12px", resize: "none" }}
-                        placeholder={active ? "Steer the agent (runs after the current turn)…" : "Send a follow-up to continue this agent…"}
-                        value={steer} onChange={(e) => setSteer(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSteer(); } }} />
-              <button className="btn btn-primary" disabled={busy || !steer.trim()} onClick={sendSteer}><Icon name="send" size={14} /> Send</button>
+        {/* Always available: steer while running, or reactivate a rested session.
+            Native threads are continuable, so even a stopped/ended session resumes. */}
+        <div className="sticky bottom-0 mt-4 pt-3 bg-bg/90 backdrop-blur">
+          {!inFlight && (
+            <div className="text-[11px] text-faint mb-1.5 flex items-center gap-1.5">
+              <Icon name="refresh" size={11} />
+              {s.status === "idle" ? "Paused — send a message to continue (the agent's thread is kept)."
+                : `Session ${s.status} — send a message to reactivate and continue it.`}
             </div>
+          )}
+          <div className="flex items-end gap-2">
+            <textarea className="input" style={{ height: 44, padding: "11px 12px", resize: "none" }}
+                      placeholder={inFlight ? "Steer the agent — runs after the current turn…" : "Send a message to continue this session…"}
+                      value={steer} onChange={(e) => setSteer(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSteer(); } }} />
+            <button className="btn btn-primary" disabled={busy || !steer.trim()} onClick={sendSteer}>
+              <Icon name={inFlight ? "send" : "play"} size={14} /> {inFlight ? "Send" : "Continue"}
+            </button>
           </div>
-        )}
+        </div>
       </div>
     </>
   );

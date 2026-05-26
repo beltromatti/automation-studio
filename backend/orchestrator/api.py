@@ -291,10 +291,12 @@ def create_app() -> FastAPI:
     async def delete_profile(pid: str):
         from . import profiles
         mgr = get_manager()
-        # never delete a profile a run is actively using (it runs on the master dir)
+        # never delete a profile a run or an agent is actively using
         if any(r["profileId"] == pid and r["status"] in ("starting", "running", "controlled")
                for r in mgr.list()):
             return JSONResponse({"error": "profile is busy with a run"}, status_code=400)
+        if any(b.get("pid") == pid for b in mgr.agent_browsers.values()):
+            return JSONResponse({"error": "profile is busy with an agent"}, status_code=400)
         # close any open login window first so its files aren't locked
         await mgr.close_profile_session(pid)
         ok = profiles.delete(pid)

@@ -193,6 +193,13 @@ def _norm_claude(obj: dict) -> list[dict]:
     return out
 
 
+_RUNNING = {"starting", "queued", "running"}  # a turn is in flight (can't reactivate, only queue)
+
+
+class _Stopped(Exception):
+    """Raised when a session is stopped while it was queued waiting for a profile."""
+
+
 def _extract_run_id(result: Any) -> str | None:
     """A studio_run_workflow tool result may arrive as plain JSON (Claude) or
     wrapped in MCP {content:[{text}]} (Codex). Dig out runId either way."""
@@ -245,9 +252,11 @@ class AgentManager:
                 for d in json.loads(SESSIONS_FILE.read_text()):
                     s = AgentSession(**{k: d[k] for k in AgentSession.__dataclass_fields__ if k in d})
                     if s.status not in TERMINAL:
-                        s.status = "done" if s.turns else "failed"
-                        s.error = s.error or ("interrupted (backend restarted)" if not s.turns else None)
+                        # interrupted by a restart — resources are gone, but the
+                        # native thread persists, so leave it reactivatable.
+                        s.status = "idle"
                         s.controlPort = None
+                        s.pendingSteers = []
                         s.finishedAt = s.finishedAt or time.time()
                     self.sessions[s.id] = s
                     tf = SESSIONS_DIR / s.id / "transcript.jsonl"
@@ -394,14 +403,15 @@ class AgentManager:
         return s
 
     def steer(self, sid: str, message: str) -> dict:
+        """Send a message to a session. If a turn is in flight, it's queued for the
+        next turn; otherwise it REACTIVATES the session (resumes the native thread).
+        Works from idle/done/failed/canceled — sessions are continuable."""
         s = self.sessions.get(sid)
         if not s:
             return {"ok": False, "error": "no such session"}
-        if s.status in TERMINAL:
-            return {"ok": False, "error": "session has ended"}
-        if s.status == "running":
+        if s.status in _RUNNING:
             s.pendingSteers.append(message)   # delivered as the next turn when this one ends
-            self._emit(sid, {"kind": "system", "text": "↩ steer queued (will run after the current turn)"})
+            self._emit(sid, {"kind": "system", "text": "↩ message queued — runs after the current turn"})
             self._save_sessions()
             return {"ok": True, "queued": True}
         asyncio.create_task(self._run_turn(s, message, resume=True))
@@ -411,14 +421,14 @@ class AgentManager:
         s = self.sessions.get(sid)
         if not s:
             return {"ok": True}
+        s.status = "canceled"             # signals a queued-acquire loop to abort
+        s.pendingSteers.clear()
         proc = self.procs.get(sid)
         if proc and proc.pid:
             kill_tree(proc.pid)
         await self._release_browser(s)
-        if s.status not in TERMINAL:
-            s.status = "canceled"
-            s.finishedAt = time.time()
-        self._emit(sid, {"kind": "system", "text": "■ stopped by user"})
+        s.finishedAt = time.time()
+        self._emit(sid, {"kind": "system", "text": "■ stopped"})
         self._save_sessions()
         return {"ok": True}
 
@@ -431,26 +441,54 @@ class AgentManager:
 
     # ------------------------------------------------------------------ ownership
     async def _ensure_browser(self, s: AgentSession) -> None:
+        """Acquire the agent's browser for a turn. A persistent profile is taken
+        through the RunManager's single per-profile gate, QUEUEING (not failing)
+        until it's free of any run / manual session / other agent. Held only for
+        the duration of the turn; released at rest."""
         if "browser" not in s.scopes or s.controlPort:
             return
         mgr = get_manager()
-        res = await mgr.open_profile_session(s.profileId)  # serialises the profile + starts control-server
+        waited = False
+        while not mgr.claim_profile(s.profileId):
+            if s.status == "canceled":         # stopped while queued
+                raise _Stopped()
+            if not waited:
+                waited = True
+                s.status = "queued"
+                self._emit(s.id, {"kind": "status", "status": "queued"})
+                self._emit(s.id, {"kind": "system", "text": f"⏳ waiting for profile “{s.profileName}” to be free…"})
+                self._save_sessions()
+            await asyncio.sleep(0.4)
+        try:
+            res = await mgr.open_agent_browser(s.id, s.profileId, headed=s.watch)
+        finally:
+            mgr.unclaim_profile(s.profileId)
         if not res.get("ok"):
             raise RuntimeError(res.get("error", "could not open the browser for this agent"))
         s.controlPort = res.get("port")
+        if s.status == "canceled":             # stopped during acquire → undo
+            await self._release_browser(s)
+            raise _Stopped()
 
     async def _release_browser(self, s: AgentSession) -> None:
-        if s.controlPort:
+        if s.controlPort or s.id in get_manager().agent_browsers:
             try:
-                await get_manager().close_profile_session(s.profileId)
+                await get_manager().release_agent_browser(s.id)
             except Exception:
                 pass
             s.controlPort = None
 
     # ------------------------------------------------------------------ engine turn
-    async def _run_turn(self, s: AgentSession, prompt: str, resume: bool) -> None:
+    async def _run_turn(self, s: AgentSession, prompt: str, resume: bool, _retry: bool = False) -> None:
+        s.status = "starting"
+        s.error = None
+        s.finishedAt = None
+        self._emit(s.id, {"kind": "system", "text": ("↪ " + prompt) if resume else prompt, "role": "user"})
+        self._save_sessions()
         try:
-            await self._ensure_browser(s)
+            await self._ensure_browser(s)   # may queue for a busy profile
+        except _Stopped:
+            return  # stopped while queued; status is already "canceled"
         except Exception as e:
             s.status = "failed"; s.error = str(e); s.finishedAt = time.time()
             self._emit(s.id, {"kind": "error", "text": str(e)})
@@ -460,7 +498,6 @@ class AgentManager:
         if not s.startedAt:
             s.startedAt = time.time()
         self._save_sessions()
-        self._emit(s.id, {"kind": "system", "text": ("↪ " + prompt) if resume else prompt, "role": "user"})
 
         backend_url = f"http://127.0.0.1:{os.environ.get('AUTOMATION_PORT', '8765')}"
         d = self.defs.get(s.agentId)
@@ -475,6 +512,7 @@ class AgentManager:
 
         ws = SESSIONS_DIR / s.id / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
+        resume_attempted = resume and bool(s.threadId)  # did we use the engine's resume path?
         try:
             if s.engine == "codex":
                 cmd = self._codex_cmd(s, prompt, sysprompt, env_pairs, str(ws), resume)
@@ -497,8 +535,8 @@ class AgentManager:
             s.status = "failed"; s.error = str(e); s.finishedAt = time.time(); self._save_sessions()
             return
         self.procs[s.id] = proc
-        runids_before = set(s.runIds)
-        asyncio.create_task(self._drain_stderr(s.id, proc.stderr))
+        turn_flags: dict = {}
+        drain = asyncio.create_task(self._drain_stderr(s.id, proc.stderr, turn_flags))
         while True:
             try:
                 raw = await proc.stdout.readline()
@@ -521,22 +559,38 @@ class AgentManager:
                     if rid and rid not in s.runIds:
                         s.runIds.append(rid)
         code = await proc.wait()
+        try:
+            await asyncio.wait_for(drain, timeout=2)
+        except Exception:
+            pass
         self.procs.pop(s.id, None)
         s.turns += 1
-        _ = runids_before
+        # Resume failed (e.g. the prior turn was interrupted before the engine
+        # saved its rollout) → fall back to a fresh turn so the message still runs.
+        if code != 0 and resume_attempted and turn_flags.get("resume_failed") and not _retry and s.status != "canceled":
+            self._emit(s.id, {"kind": "system", "text": "↻ couldn't resume the previous thread — starting a fresh session for this message"})
+            s.threadId = None
+            await self._run_turn(s, prompt, resume=False, _retry=True)
+            return
         if code != 0 and s.status == "running":
             self._emit(s.id, {"kind": "error", "text": f"{s.engine} exited with code {code}"})
-        # next steer, or go idle / done
-        if s.pendingSteers:
+        # A message queued during this turn → continue immediately, KEEPING the
+        # browser (no restart between back-to-back turns).
+        if s.pendingSteers and s.status != "canceled":
             nxt = s.pendingSteers.pop(0)
             self._save_sessions()
             await self._run_turn(s, nxt, resume=True)
             return
-        s.status = "idle"
-        self._emit(s.id, {"kind": "status", "status": "idle"})
+        # At rest → release the browser/profile lock so other runs/agents can use
+        # it. The session stays fully reactivatable: a new message resumes it.
+        await self._release_browser(s)
+        if s.status != "canceled":
+            s.status = "idle"
+            s.finishedAt = time.time()
+            self._emit(s.id, {"kind": "status", "status": "idle"})
         self._save_sessions()
 
-    async def _drain_stderr(self, sid: str, stream) -> None:
+    async def _drain_stderr(self, sid: str, stream, flags: dict | None = None) -> None:
         if not stream:
             return
         while True:
@@ -546,9 +600,15 @@ class AgentManager:
                 break
             if not raw:
                 break
-            # engine stderr is mostly progress noise; surface only error-ish lines
             line = raw.decode(errors="replace").strip()
-            if line and any(w in line.lower() for w in ("error", "failed", "exception", "denied")):
+            if not line:
+                continue
+            low = line.lower()
+            # detect a failed resume so the caller can retry the message fresh
+            if flags is not None and ("no rollout" in low or ("resume" in low and ("fail" in low or "not found" in low))):
+                flags["resume_failed"] = True
+            # engine stderr is mostly progress noise; surface only error-ish lines
+            if any(w in low for w in ("error", "failed", "exception", "denied")):
                 self._emit(sid, {"kind": "system", "text": f"[{self.sessions[sid].engine}] {line[:200]}"})
 
     # ------------------------------------------------------------------ command builders
