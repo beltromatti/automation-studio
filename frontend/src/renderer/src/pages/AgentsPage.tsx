@@ -141,6 +141,9 @@ function AgentEditor({ agent, engines, onClose, onSaved }: {
   const toggle = (s: string) => setScopes((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
   const save = async () => {
     if (!name.trim()) { setError("Name is required."); return; }
+    if (a?.builtin && !confirm(
+      "This is a built-in agent. It's better not to modify built-ins directly — consider duplicating " +
+      "one and making your own instead. Save changes anyway?")) return;
     try {
       const body = { name, description, engine, systemPrompt, scopes: scopes.includes("studio") ? scopes : ["studio", ...scopes] };
       if (isNew) await jpost("/api/agents", body);

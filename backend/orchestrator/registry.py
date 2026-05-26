@@ -294,6 +294,23 @@ def user_workflow_source(wid: str) -> str | None:
     return p.read_text() if p.exists() else None
 
 
+def workflow_source(wid: str) -> str | None:
+    """Source code of a workflow: the .py for user/agent workflows; best-effort the
+    module source for built-ins (available in dev; not in a frozen build)."""
+    src = user_workflow_source(wid)
+    if src is not None:
+        return src
+    w = next((x for x in WORKFLOWS if x.id == wid), None)
+    if not w:
+        return None
+    try:
+        import importlib
+        import inspect
+        return inspect.getsource(importlib.import_module(w.module))
+    except Exception:
+        return None  # frozen build: built-in source isn't shipped
+
+
 def public_workflow(w: WorkflowDef) -> dict:
     """Serialisable view for the API (drops the build_argv callable)."""
     return {

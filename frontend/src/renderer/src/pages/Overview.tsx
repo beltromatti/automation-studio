@@ -4,13 +4,13 @@ import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
 import { RunRow } from "@/components/RunRow";
 import { WorkflowEditor } from "@/components/WorkflowEditor";
-import { jget } from "@/lib/client";
+import { jget, jdel } from "@/lib/client";
 import { useRuns } from "@/components/RunsProvider";
 import type { PublicWorkflow } from "@/lib/types";
 
 export default function Overview() {
   const [workflows, setWorkflows] = useState<PublicWorkflow[]>([]);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<PublicWorkflow | "new" | null>(null);
   const { runs } = useRuns();
 
   const load = useCallback(() => {
@@ -21,7 +21,7 @@ export default function Overview() {
   return (
     <>
       <Header title="Workflows" sub="Ready-to-run automations — built-in or your own"
-        actions={<button className="btn btn-primary btn-sm" onClick={() => setEditing(true)}><Icon name="plus" size={14} /> New workflow</button>} />
+        actions={<button className="btn btn-primary btn-sm" onClick={() => setEditing("new")}><Icon name="plus" size={14} /> New workflow</button>} />
       <div className="px-7 py-6 max-w-[1100px]">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {workflows.map((w) => {
@@ -35,7 +35,9 @@ export default function Overview() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="text-[15px] font-semibold">{w.name}</h3>
-                      {!w.builtin && (
+                      {w.builtin ? (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded text-faint" style={{ background: "#161616" }}>built-in</span>
+                      ) : (
                         <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#0072f518", color: "#3b9eff" }}>{w.createdBy === "agent" ? "agent-made" : "custom"}</span>
                       )}
                       {w.needsAuth && (
@@ -47,9 +49,13 @@ export default function Overview() {
                 </div>
                 <div className="flex items-center justify-between mt-4 pt-4 border-t" style={{ borderColor: "var(--color-line)" }}>
                   <span className="text-[11px] text-faint mono">{last ? `last run ${last.status}` : "never run"}</span>
-                  <Link to={`/workflows/${w.id}`} className="btn btn-primary btn-sm">
-                    <Icon name="play" size={13} /> Run
-                  </Link>
+                  <div className="flex items-center gap-1.5">
+                    <button className="btn btn-secondary btn-sm" title={w.builtin ? "Duplicate (built-ins can't be edited in place)" : "Edit"} onClick={() => setEditing(w)}><Icon name="pencil" size={13} /></button>
+                    {!w.builtin && (
+                      <button className="btn btn-secondary btn-sm" title="Delete" onClick={async () => { if (confirm(`Delete workflow "${w.name}"?`)) { await jdel(`/api/workflows/${w.id}`); load(); } }}><Icon name="trash" size={13} /></button>
+                    )}
+                    <Link to={`/workflows/${w.id}`} className="btn btn-primary btn-sm"><Icon name="play" size={13} /> Run</Link>
+                  </div>
                 </div>
               </div>
             );
@@ -69,7 +75,7 @@ export default function Overview() {
           </div>
         </div>
       </div>
-      {editing && <WorkflowEditor workflow="new" onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />}
+      {editing && <WorkflowEditor workflow={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />}
     </>
   );
 }

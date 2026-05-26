@@ -30,7 +30,7 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
 }) {
   const isNew = workflow === "new";
   const w = isNew ? null : (workflow as PublicWorkflow);
-  const [name, setName] = useState(w?.name ?? "");
+  const [name, setName] = useState(w ? (w.builtin ? `${w.name} (copy)` : w.name) : "");
   const [description, setDescription] = useState(w?.description ?? "");
   const [profile, setProfile] = useState<"ephemeral" | "shared">((w?.profile as "ephemeral" | "shared") ?? "ephemeral");
   const [needsAuth, setNeedsAuth] = useState(!!w?.needsAuth);
@@ -45,8 +45,8 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!isNew && w && !w.builtin) {
-      jget<{ source: string }>(`/api/workflows/${w.id}/source`).then((d) => setCode(d.source)).catch(() => setCode(TEMPLATE));
+    if (!isNew && w) {
+      jget<{ source: string }>(`/api/workflows/${w.id}/source`).then((d) => setCode(d.source || TEMPLATE)).catch(() => setCode(TEMPLATE));
     }
   }, [isNew, w]);
 
@@ -55,6 +55,10 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
 
   const save = async () => {
     if (!name.trim()) { setError("Name is required."); return; }
+    if (w?.builtin && !confirm(
+      "This is a built-in workflow. Built-ins ship with the app and can't be changed in place — " +
+      "saving creates your own editable copy. It's best to copy built-ins and build on them rather " +
+      "than depend on editing them. Create a copy now?")) return;
     setBusy(true); setError("");
     try {
       const body: Record<string, unknown> = {
@@ -63,7 +67,7 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
         outputContract: contract.filter((c) => c.name.trim()),
         inputContract: inputC.filter((c) => c.name.trim()),
       };
-      if (!isNew && w) body.id = w.id;
+      if (!isNew && w && !w.builtin) body.id = w.id; // builtin → fork to a fresh id from the name
       const r = await jpost<{ workflow: { id: string } }>("/api/workflows", body);
       onSaved(r.workflow.id);
     } catch (e) { setError(String((e as Error).message)); setBusy(false); }
@@ -73,9 +77,15 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6" style={{ background: "#000000aa" }} onClick={onClose}>
       <div className="card p-5 overflow-auto" style={{ width: 820, maxWidth: "94vw", maxHeight: "90vh" }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-3">
-          <div className="text-[14px] font-semibold">{isNew ? "New workflow" : `Edit ${w!.name}`}</div>
+          <div className="text-[14px] font-semibold">{isNew ? "New workflow" : w!.builtin ? `Duplicate ${w!.name}` : `Edit ${w!.name}`}</div>
           <button className="text-faint hover:text-fg" onClick={onClose}><Icon name="x" size={16} /></button>
         </div>
+        {w?.builtin && (
+          <div className="card p-3 mb-3 text-[12px] flex items-start gap-2" style={{ background: "#f5a62312", color: "#f5a623", borderColor: "#4a3a1a" }}>
+            <Icon name="alert" size={15} />
+            <span>This is a <b>built-in</b> workflow. It can't be edited in place — saving creates your own editable copy. Prefer copying built-ins and building on them.</span>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3 mb-3">
           <div><label className="label">Name</label><input className="input mt-1" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. LinkedIn Connect" /></div>
           <div>
@@ -141,7 +151,7 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
         </label>
 
         {error && <div className="text-[12px] text-danger mb-2">{error}</div>}
-        <button className="btn btn-primary btn-sm" disabled={busy} onClick={save}><Icon name="check" size={13} /> {busy ? "Saving…" : isNew ? "Create workflow" : "Save changes"}</button>
+        <button className="btn btn-primary btn-sm" disabled={busy} onClick={save}><Icon name="check" size={13} /> {busy ? "Saving…" : isNew ? "Create workflow" : w!.builtin ? "Create copy" : "Save changes"}</button>
       </div>
     </div>
   );

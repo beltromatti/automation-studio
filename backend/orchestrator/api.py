@@ -11,8 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 
 from .manager import get_manager
-from .registry import (all_workflows, public_workflow, save_user_workflow,
-                       delete_user_workflow, user_workflow_source)
+from .registry import (all_workflows, get_workflow, public_workflow, save_user_workflow,
+                       delete_user_workflow, workflow_source)
 from . import datastore
 
 
@@ -60,9 +60,11 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=400)
 
     @app.get("/api/workflows/{wid}/source")
-    async def workflow_source(wid: str):
-        src = user_workflow_source(wid)
-        return {"source": src} if src is not None else JSONResponse({"error": "not found or built-in"}, status_code=404)
+    async def workflow_source_ep(wid: str):
+        w = get_workflow(wid)
+        if not w:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return {"source": workflow_source(wid) or "", "builtin": w.builtin}
 
     @app.delete("/api/workflows/{wid}")
     async def remove_workflow(wid: str):

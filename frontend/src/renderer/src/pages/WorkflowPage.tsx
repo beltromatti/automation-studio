@@ -47,12 +47,12 @@ export default function WorkflowPage() {
           </span>
         }
         sub={workflow.builtin ? workflow.module : `custom · ${workflow.module}`}
-        actions={!workflow.builtin && (
+        actions={
           <>
-            <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}><Icon name="pencil" size={13} /> Edit</button>
-            <button className="btn btn-secondary btn-sm" onClick={del}><Icon name="trash" size={13} /></button>
+            <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)}><Icon name="pencil" size={13} /> {workflow.builtin ? "Duplicate" : "Edit"}</button>
+            {!workflow.builtin && <button className="btn btn-secondary btn-sm" onClick={del}><Icon name="trash" size={13} /></button>}
           </>
-        )}
+        }
       />
       <div className="px-7 py-6 max-w-[1000px]">
         <p className="text-[13px] text-muted max-w-[620px] leading-relaxed mb-5">{workflow.description}</p>
@@ -67,7 +67,7 @@ export default function WorkflowPage() {
           </div>
         )}
       </div>
-      {editing && <WorkflowEditor workflow={workflow} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />}
+      {editing && <WorkflowEditor workflow={workflow} onClose={() => setEditing(false)} onSaved={(nid) => { setEditing(false); if (nid && nid !== workflow.id) navigate(`/workflows/${nid}`); else load(); }} />}
     </>
   );
 }
