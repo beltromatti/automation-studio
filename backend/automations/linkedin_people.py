@@ -35,6 +35,7 @@ import json
 import random
 import re
 import sys
+import unicodedata
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from urllib.parse import urlencode, quote, urlparse, parse_qs
@@ -49,20 +50,54 @@ NETWORK_CODES = {"1": "F", "1st": "F", "f": "F",
                  "2": "S", "2nd": "S", "s": "S",
                  "3": "O", "3rd": "O", "3rd+": "O", "o": "O"}
 
+# LinkedIn stores cities under their ENGLISH label, so its typeahead ranks the right
+# place #1 for English names but can mis-rank a local-language one whose literal prefix
+# is a different popular entity ("Roma" -> "Romania"). We feed the typeahead the
+# canonical English name for the handful of well-known cities where that diverges; the
+# actual id still comes from LinkedIn's own suggestion. Keys are accent-folded lowercase.
+LOCATION_ALIASES = {
+    "roma": "Rome", "milano": "Milan", "torino": "Turin", "firenze": "Florence",
+    "napoli": "Naples", "venezia": "Venice", "genova": "Genoa", "padova": "Padua",
+    "mantova": "Mantua", "siracusa": "Syracuse", "munchen": "Munich", "koln": "Cologne",
+    "wien": "Vienna", "praha": "Prague", "lisboa": "Lisbon", "moskva": "Moscow",
+    "geneve": "Geneva", "bruxelles": "Brussels", "antwerpen": "Antwerp",
+    "goteborg": "Gothenburg", "kobenhavn": "Copenhagen", "warszawa": "Warsaw",
+    "sevilla": "Seville", "den haag": "The Hague", "lisbona": "Lisbon",
+}
+
+
+def _alias_location(value: str) -> str:
+    """Map a well-known local-language city name to the English label LinkedIn indexes
+    it under, so its typeahead ranks the intended place first. Unknown names pass through."""
+    key = value.lower().strip()
+    key = "".join(c for c in unicodedata.normalize("NFD", key) if unicodedata.category(c) != "Mn")
+    return LOCATION_ALIASES.get(key, value)
+
 # ---------------------------------------------------------------- result cards (short)
 _CARDS_JS = r"""(maxPerPage) => {
-  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  const clean = s => (s || '').replace(/[\u200b-\u200d\u2060\ufeff]/g, '').replace(/\s+/g, ' ').trim();
   const itemsOf = (ct) => {
     let it = [...ct.querySelectorAll(':scope > li, :scope > [role="listitem"]')];
     if (!it.length) it = [...ct.querySelectorAll('[role="listitem"]')];
     if (!it.length) it = [...ct.querySelectorAll(':scope > li')];
     return it;
   };
-  const containers = [...document.querySelectorAll('ul, [role="list"]')];
-  let best = null, bestN = 0;
+  // ONLY look inside <main>: the people-search results live there, while the
+  // messaging overlay, global nav and "people you may know" rails (all full of
+  // /in/ links) sit OUTSIDE main — scraping those gave random/garbage rows when a
+  // search returned few/no results. Among main's lists, prefer the one whose items
+  // carry a connection-degree badge (the real result cards), so a stray sidebar
+  // can't outscore the results.
+  const root = document.querySelector('main') || document.body;
+  const degRe = /[•·]\s*[123]\s*(?:°|st|nd|rd|th)/i;
+  const containers = [...root.querySelectorAll('ul, [role="list"]')];
+  let best = null, bestScore = 0;
   for (const ct of containers) {
-    const n = itemsOf(ct).filter((it) => it.querySelector('a[href*="/in/"]')).length;
-    if (n > bestN) { bestN = n; best = ct; }
+    const items = itemsOf(ct).filter((it) => it.querySelector('a[href*="/in/"]'));
+    if (!items.length) continue;
+    const withDeg = items.filter((it) => degRe.test(it.innerText || '')).length;
+    const score = withDeg * 1000 + items.length;
+    if (score > bestScore) { bestScore = score; best = ct; }
   }
   if (!best) return [];
   const degBullet = /[•·]\s*([123])\s*(?:°|st|nd|rd|th)\s*(\+)?/i;
@@ -115,7 +150,7 @@ _CARDS_JS = r"""(maxPerPage) => {
 # ---------------------------------------------------------------- profile main page (full)
 _PROFILE_JS = r"""() => {
   const main = document.querySelector('main') || document.body;
-  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  const clean = s => (s || '').replace(/[\u200b-\u200d\u2060\ufeff]/g, '').replace(/\s+/g, ' ').trim();
   let lines = (main.innerText || '').split('\n').map(clean).filter(Boolean);
   // drop LinkedIn's global footer so it can't pollute About / chips parsing
   const FOOTER = /^(accessibility|talent solutions|community guidelines|user agreement|privacy policy|cookie policy|©\s*\d{4}|linkedin corporation|about\s+accessibility)/i;
@@ -124,11 +159,15 @@ _PROFILE_JS = r"""() => {
   const flat = lines.join(' ');
   const SECTION = /^(about|informazioni|activity|attività|experience|esperienza|education|formazione|highlights|in evidenza|featured|skills|competenze|interests|recommendations|licenses|licenze|languages|lingue|volunteer|organizations|projects|honors|courses|people you may know|more profiles|explore)/i;
   const DEGREE = /^[·•]?\s*(1st|2nd|3rd|3rd\+|°)\s*\+?$/i;
+  // pronoun chip ("She/Her", "(He/Him)", "They/Them") renders as its own line right
+  // after the name — skip it so it can't be mistaken for the headline. Requires the
+  // slash so a real headline ("He builds products") can never match.
+  const PRONOUN = /^\(?\s*(she|he|they|ze|xe|hir|per|ey|fae)\s*\/\s*(her|him|them|hir|ze|xem|per|em|she|he|they|fae|faer)\s*\)?$/i;
 
   const name = lines[0] || '';
-  // headline: first line after the name that isn't the connection-degree badge.
+  // headline: first line after the name that isn't the connection-degree or pronoun chip.
   let headline = '', hi = 1;
-  while (lines[hi] && (DEGREE.test(lines[hi]) || lines[hi] === '·')) hi++;
+  while (lines[hi] && (DEGREE.test(lines[hi]) || lines[hi] === '·' || PRONOUN.test(lines[hi]))) hi++;
   if (lines[hi] && !/^contact info$/i.test(lines[hi]) && !SECTION.test(lines[hi])) headline = lines[hi];
 
   // location: LinkedIn renders "<location> · Contact info"; take the line two
@@ -256,15 +295,40 @@ async def _open_all_filters(session) -> bool:
     return bool(ok)
 
 
-async def _add_entity(session, add_label_re: str, value: str) -> bool:
-    """Click an 'Add a X' button in the open filter panel, type ``value`` and pick
-    the first autocomplete suggestion. Returns True if a suggestion was chosen."""
+# Read the current suggestion list as a single signature string (used to detect when
+# the async typeahead has stopped re-ranking), or '' when no options are showing yet.
+_OPTIONS_SIG_JS = r"""() => [...document.querySelectorAll('[role=option], [role=listbox] li')]
+  .map(o => (o.innerText || '').replace(/\s+/g, ' ').trim()).filter(Boolean).join(' | ')"""
+
+# Pick LinkedIn's TOP suggestion and return its text (for logging). We deliberately
+# trust LinkedIn's own multilingual relevance ranking rather than string-matching the
+# typed value: once the list has SETTLED, #1 is the right entity even across the
+# local→English gap LinkedIn stores its data under ("Milano"→Milan, "Torino"→Turin,
+# "Firenze"→Florence). Any literal string heuristic here is strictly worse — it would
+# reject the correct translated city and chase the same-spelling homonym ("Milano,
+# Texas"). The only residual loss is a query whose literal prefix is a *different*
+# popular entity ("Roma" ranks "Romania" #1); that's unwinnable by text and is covered
+# by the resolved-entity log + the direct-geoUrn-id escape hatch.
+_PICK_FIRST_JS = r"""() => {
+  const opts = [...document.querySelectorAll('[role=option], [role=listbox] li')]
+    .filter(o => (o.innerText || '').trim());
+  if (!opts.length) return null;
+  const pick = opts[0];
+  const txt = (pick.innerText || '').replace(/\s+/g, ' ').trim();
+  pick.click();
+  return txt;
+}"""
+
+
+async def _add_entity(session, add_label_re: str, value: str) -> str | None:
+    """Click an 'Add a X' button in the open filter panel, type ``value``, wait for the
+    typeahead to SETTLE, then pick LinkedIn's top suggestion. Returns its text, or None."""
     clicked = await session.evaluate(
         "(re) => { const dlg=document.querySelector('[role=dialog]')||document; "
         "const b=[...dlg.querySelectorAll('button')].find(x=>new RegExp(re,'i').test(x.innerText)); "
         "if(b){b.click(); return true;} return false; }", add_label_re)
     if not clicked:
-        return False
+        return None
     await session.sleep(900)
     # the entity typeaheads are comboboxes (aria-autocomplete) — distinct from the
     # plain free-text Keywords inputs; type into the most-recently-revealed one.
@@ -278,16 +342,29 @@ async def _add_entity(session, add_label_re: str, value: str) -> bool:
         "inp.dispatchEvent(new KeyboardEvent('keydown',{key:last,bubbles:true})); "
         "inp.dispatchEvent(new KeyboardEvent('keyup',{key:last,bubbles:true})); return true; }", value)
     if not typed:
-        return False
-    for _ in range(24):  # wait for the async typeahead suggestions, then pick the first
-        await session.sleep(500)
-        picked = await session.evaluate(
-            "() => { const o=document.querySelector('[role=option], [role=listbox] li'); "
-            "if(o){o.click(); return true;} return false; }")
-        if picked:
-            await session.sleep(900)
-            return True
-    return False
+        return None
+    # Wait for suggestions to appear AND stop re-ranking. The list streams in: the
+    # first frame is stale (e.g. "Milano" briefly shows "Milano, Texas" on top before
+    # refining to "Milan, Italy"), so we only pick once the signature is unchanged for
+    # two consecutive polls — then take LinkedIn's settled #1.
+    prev, stable = None, 0
+    for _ in range(25):
+        await session.sleep(400)
+        sig = await session.evaluate(_OPTIONS_SIG_JS)
+        if not sig:
+            continue
+        if sig == prev:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            prev, stable = sig, 0
+    if not prev:  # suggestions never showed
+        return None
+    chosen = await session.evaluate(_PICK_FIRST_JS)
+    if chosen:
+        await session.sleep(900)
+    return chosen
 
 
 async def resolve_entities(session, locations: list[str], industries: list[str], seed: str = "") -> dict:
@@ -306,15 +383,17 @@ async def resolve_entities(session, locations: list[str], industries: list[str],
         return {}
     added = 0
     for loc in locations:
-        if await _add_entity(session, r"add a location|aggiungi una localit", loc):
+        chosen = await _add_entity(session, r"add a location|aggiungi una localit", _alias_location(loc))
+        if chosen:
             added += 1
-            ev.log(f"[filters] location resolved: {loc}")
+            ev.log(f"[filters] location '{loc}' → '{chosen}'")
         else:
             ev.log(f"[filters] location not found: {loc}")
     for ind in industries:
-        if await _add_entity(session, r"add an industry|aggiungi un settore", ind):
+        chosen = await _add_entity(session, r"add an industry|aggiungi un settore", ind)
+        if chosen:
             added += 1
-            ev.log(f"[filters] industry resolved: {ind}")
+            ev.log(f"[filters] industry '{ind}' → '{chosen}'")
         else:
             ev.log(f"[filters] industry not found: {ind}")
     if not added:
@@ -351,7 +430,7 @@ async def _dismiss_cookie_banner(session) -> None:
             return
 
 
-_RESULTS_SEL = '[role="list"] a[href*="/in/"], ul li a[href*="/in/"]'
+_RESULTS_SEL = 'main [role="list"] a[href*="/in/"], main ul li a[href*="/in/"]'
 
 
 async def _load_results(session, timeout_ms: int = 15000) -> bool:
@@ -416,18 +495,35 @@ async def scrape_people(*, keywords: str = "", current_title: str = "", first_na
     people: list[Person] = []
     seen: set[str] = set()
     try:
-        # 1) resolve entity filters (location/industry) via the real autocomplete
-        resolved = await resolve_entities(session, _norm_list(locations), _norm_list(industries),
+        # 1) resolve entity filters (location/industry). A purely-numeric value is
+        # taken as an already-known LinkedIn id (fully deterministic, skips the UI);
+        # names are resolved through the real autocomplete.
+        locs, inds = _norm_list(locations), _norm_list(industries)
+        geo_ids = [x for x in locs if x.isdigit()]
+        loc_names = [x for x in locs if not x.isdigit()]
+        ind_ids = [x for x in inds if x.isdigit()]
+        ind_names = [x for x in inds if not x.isdigit()]
+        resolved = await resolve_entities(session, loc_names, ind_names,
                                           seed=keywords or current_title or current_company)
-        # graceful fallback: if a requested location couldn't be resolved to an id,
-        # fold it into the fuzzy keywords so location targeting still happens.
-        if _norm_list(locations) and not resolved.get("geoUrn"):
-            keywords = " ".join(x for x in [keywords, *_norm_list(locations)] if x).strip()
-            ev.log(f"[filters] location not resolved to an id — using it as fuzzy keywords")
+        geo_urn = list(dict.fromkeys(geo_ids + resolved.get("geoUrn", [])))
+        industry_ids = list(dict.fromkeys(ind_ids + resolved.get("industry", [])))
+        # graceful fallback: a requested location NAME that didn't resolve to any id
+        # is folded into the fuzzy keywords (logged, never silent) so targeting still
+        # happens instead of being dropped.
+        if loc_names and not geo_urn:
+            keywords = " ".join(x for x in [keywords, *loc_names] if x).strip()
+            ev.log(f"[filters] location(s) {loc_names} not resolved to an id — folded into keywords")
+        if ind_names and not resolved.get("industry"):
+            ev.log(f"[filters] industry(ies) {ind_names} not resolved to an id — skipped")
         base_url = build_search_url(
             keywords=keywords, current_title=current_title, first_name=first_name, last_name=last_name,
             current_company=current_company, school=school, connections=connections,
-            profile_languages=profile_languages, geo_urn=resolved.get("geoUrn"), industry=resolved.get("industry"))
+            profile_languages=profile_languages, geo_urn=geo_urn or None, industry=industry_ids or None)
+        applied = {k: v for k, v in {"keywords": keywords, "title": current_title, "firstName": first_name,
+                   "lastName": last_name, "company": current_company, "school": school,
+                   "connections": connections, "profileLanguage": profile_languages,
+                   "geoUrn": geo_urn, "industry": industry_ids}.items() if v}
+        ev.log("[filters] applied: " + json.dumps(applied, ensure_ascii=False))
         ev.log(f"[search] {base_url}")
 
         # 2) collect result cards across pages (short data for everyone)
@@ -493,8 +589,11 @@ def main(argv=None) -> int:
     p.add_argument("--current-company", default="", help="current company (free text)")
     p.add_argument("--school", default="", help="school (free text)")
     p.add_argument("--location", "--locations", dest="locations", default="",
-                   help="comma-separated locations (resolved via LinkedIn autocomplete)")
-    p.add_argument("--industries", default="", help="comma-separated industries (resolved via autocomplete)")
+                   help="comma-separated locations: a name (resolved via LinkedIn autocomplete, "
+                        "local names like 'Roma'/'Milano' are mapped to LinkedIn's English label) "
+                        "or a numeric geoUrn id for exact deterministic targeting")
+    p.add_argument("--industries", default="",
+                   help="comma-separated industries: a name (resolved via autocomplete) or a numeric industry id")
     p.add_argument("--connections", default="", help="connection degrees, e.g. '1st,2nd,3rd'")
     p.add_argument("--profile-languages", default="", help="profile languages, e.g. 'en,it'")
     p.add_argument("--mode", choices=["short", "full"], default="full")

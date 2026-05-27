@@ -137,10 +137,13 @@ WORKFLOWS: list[WorkflowDef] = [
                           help="General fuzzy search. Combine with the filters below for sharper targeting."),
             WorkflowParam("currentTitle", "Current job title", "string", placeholder="Data Engineer"),
             WorkflowParam("locations", "Locations", "string", placeholder="Milan, London",
-                          help="Comma-separated. Resolved through LinkedIn's own location autocomplete."),
+                          help="Comma-separated. Each is resolved through LinkedIn's own location "
+                               "autocomplete (local names like 'Roma'/'Milano' are mapped to LinkedIn's "
+                               "English label). You can also pass a numeric geoUrn id for exact targeting."),
             WorkflowParam("currentCompany", "Current company", "string", placeholder="Google"),
             WorkflowParam("industries", "Industries", "string", placeholder="Financial Services",
-                          help="Comma-separated. Resolved through LinkedIn's industry autocomplete."),
+                          help="Comma-separated. Resolved through LinkedIn's industry autocomplete, "
+                               "or pass a numeric industry id directly."),
             WorkflowParam("school", "School", "string", placeholder="Politecnico di Milano"),
             WorkflowParam("connections", "Connection degree", "string", placeholder="2nd,3rd",
                           help="Any of 1st, 2nd, 3rd (comma-separated). Blank = all."),
