@@ -842,12 +842,19 @@ class AgentManager:
             return
 
         normalize = _norm_codex if s.engine == "codex" else _norm_claude
+        # Let big MCP tool results through to the model intact — notably an inline
+        # browser_screenshot image (a real screenshot's base64 is ~80k tokens) and
+        # large observe/extract snapshots. Claude Code caps MCP output at
+        # MAX_MCP_OUTPUT_TOKENS (default 25k) and would TRUNCATE them, corrupting the
+        # image; raise it (the file-path + Read fallback still covers any overflow).
+        turn_env = {**os.environ}
+        turn_env.setdefault("MAX_MCP_OUTPUT_TOKENS", "200000")
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE, cwd=str(ws), limit=16 * 1024 * 1024,
                 start_new_session=(os.name == "posix"),
-                env={**os.environ})
+                env=turn_env)
         except Exception as e:
             self._emit(s.id, {"kind": "error", "text": f"could not start {s.engine}: {e}"})
             s.status = "failed"; s.error = str(e); s.finishedAt = time.time(); self._save_sessions()
