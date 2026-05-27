@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import shutil
+import socket
 import sys
 import time
 import uuid
@@ -44,6 +45,23 @@ EPHEMERAL_IDS = {"ephemeral", "temporary", ""}
 
 def is_ephemeral(profile_id: str | None) -> bool:
     return (profile_id or "") in EPHEMERAL_IDS
+
+
+def _port_listening(port: int) -> bool:
+    """True if something is already accepting connections on 127.0.0.1:port. Used to
+    skip a candidate control-server port that ANY process (a manually-opened profile
+    session, an agent browser, another app) already holds — otherwise a run's server
+    fails to bind and the workflow silently attaches to whoever is on that port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.2)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _free_ephemeral_port() -> int:
+    """An OS-assigned free port, as a fallback when the fixed range is exhausted."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 DATA = data_dir()
 RUNS_DIR = DATA / "runs"
@@ -622,11 +640,19 @@ class RunManager:
             return []
 
     def _alloc_port(self) -> int:
+        """Pick a control-server port free at BOTH the bookkeeping level (no run, manual
+        profile session or agent browser is assigned it) AND the OS level (nothing is
+        currently listening on it). The OS probe is essential: manual sessions and agent
+        browsers occupy ports in this same range, and handing out one already in use made
+        a run's control-server fail to bind while the workflow silently drove whatever
+        browser was already on that port (e.g. the user's manually-opened profile)."""
         used = {r.serverPort for r in self.runs.values() if r.serverPort}
+        used |= {s["port"] for s in self.sessions.values() if s.get("port")}
+        used |= {b["port"] for b in self.agent_browsers.values() if b.get("port")}
         for p in range(PORT_BASE, PORT_BASE + 80):
-            if p not in used:
+            if p not in used and not _port_listening(p):
                 return p
-        return PORT_BASE + 79
+        return _free_ephemeral_port()
 
     # ------------------------------------------------------------------ run lifecycle
     async def start_run(self, run: Run) -> None:
@@ -678,8 +704,12 @@ class RunManager:
         self.procs.setdefault(run.id, {})["server"] = server
         asyncio.create_task(self._pump(run.id, server.stdout, "[browser] "))
 
-        if not await self._wait_ready(port, 25):
-            self._log(run.id, "[backend] control server failed to start")
+        # Our control-server must come up AND still be alive: if it died (e.g. lost a
+        # port race and failed to bind), _wait_ready could otherwise see a DIFFERENT
+        # server already on this port and we'd silently attach to the wrong browser.
+        ready = await self._wait_ready(port, 25)
+        if server.returncode is not None or not ready:
+            self._log(run.id, "[backend] control server failed to start (port busy or crashed)")
             run.status = "failed"; run.error = "control server failed to start"; run.finishedAt = time.time()
             kill_tree(server.pid)
             self._save(); self.schedule(); return
