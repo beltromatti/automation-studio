@@ -49,6 +49,17 @@ export function duration(start?: number, end?: number): string {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
+// "in 5m" / "in 12s" for a future epoch-seconds timestamp (e.g. a scheduled run/wake).
+export function untilTime(ts?: number | null): string {
+  if (!ts) return "—";
+  const s = Math.floor(ts - Date.now() / 1000);
+  if (s <= 0) return "now";
+  if (s < 60) return `in ${s}s`;
+  if (s < 3600) return `in ${Math.floor(s / 60)}m`;
+  if (s < 86400) return `in ${Math.floor(s / 3600)}h`;
+  return `in ${Math.floor(s / 86400)}d`;
+}
+
 export function formatBytes(n?: number): string {
   if (!n) return "empty";
   const u = ["B", "KB", "MB", "GB"];

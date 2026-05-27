@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { Icon } from "./Icon";
-import { timeAgo, duration } from "@/lib/client";
+import { timeAgo, duration, untilTime } from "@/lib/client";
 import type { AgentSession } from "@/lib/types";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -34,6 +34,8 @@ export function SessionRow({ session: s }: { session: AgentSession }) {
         <div className="text-[11px] text-faint mono truncate">
           {s.prompt || "—"}
           {s.turns > 1 && ` · ${s.turns} turns`}
+          {s.status === "waiting" && " · paused — waking when its workflow finishes"}
+          {s.status === "scheduled" && s.scheduledAt && ` · wakes ${untilTime(s.scheduledAt)}`}
         </div>
       </div>
       {s.controlPort ? (
@@ -46,7 +48,7 @@ export function SessionRow({ session: s }: { session: AgentSession }) {
         </span>
       )}
       <div className="text-[11px] text-faint shrink-0 w-20 text-right">
-        {active ? duration(s.startedAt) : timeAgo(s.createdAt)}
+        {s.status === "scheduled" ? untilTime(s.scheduledAt) : active ? duration(s.startedAt) : timeAgo(s.createdAt)}
       </div>
     </Link>
   );

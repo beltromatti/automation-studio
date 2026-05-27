@@ -9,7 +9,7 @@ import { CsvTable } from "@/components/CsvTable";
 import { CaptureToDataset } from "@/components/CaptureToDataset";
 import { RunControls } from "@/components/RunControls";
 import { useRuns } from "@/components/RunsProvider";
-import { jget, duration, timeAgo } from "@/lib/client";
+import { jget, duration, timeAgo, untilTime } from "@/lib/client";
 import type { Run } from "@/lib/types";
 
 const ACTIVE = ["running", "starting", "controlled"];
@@ -79,7 +79,9 @@ export default function RunDetail() {
               </span>
             )}
             <span className="text-[12px] text-faint mono ml-auto">
-              {active ? `running ${duration(run.startedAt)}` : `${duration(run.startedAt, run.finishedAt)} · ${timeAgo(run.createdAt)}`}
+              {run.status === "scheduled"
+                ? `scheduled · starts ${untilTime(run.startAt)}${run.everySeconds ? ` · repeats every ${Math.round(run.everySeconds / 60)}m` : ""}`
+                : active ? `running ${duration(run.startedAt)}` : `${duration(run.startedAt, run.finishedAt)} · ${timeAgo(run.createdAt)}`}
             </span>
           </div>
 

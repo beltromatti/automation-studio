@@ -31,7 +31,9 @@ export function RunsProvider({ children }: { children: React.ReactNode }) {
       const d = await jget<{ runs: Run[]; settings: Settings }>("/api/runs");
       setRuns(d.runs);
       setSettings(d.settings);
-      if (d.runs.some((r) => ACTIVE.includes(r.status))) delay = 2000;
+      const now = Date.now() / 1000;
+      const imminentScheduled = (r: Run) => r.status === "scheduled" && (r.startAt ?? Infinity) - now < 12;
+      if (d.runs.some((r) => ACTIVE.includes(r.status) || imminentScheduled(r))) delay = 2000;
     } catch {}
     if (!stopped.current && document.visibilityState === "visible") schedule(delay);
     // eslint-disable-next-line react-hooks/exhaustive-deps

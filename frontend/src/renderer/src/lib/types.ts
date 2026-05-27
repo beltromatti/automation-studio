@@ -75,6 +75,9 @@ export interface Run {
   profileName: string; // display name ("Temporary" or the profile's name)
   profileDir: string;
   browserOpen: boolean; // control server / window still alive
+  agentId?: string; // the agent session that launched this run, if any
+  startAt?: number; // when status === "scheduled": fire (epoch seconds)
+  everySeconds?: number; // recurring: re-arm the next occurrence
 }
 
 export interface Settings {
@@ -159,6 +162,17 @@ export interface AgentSession {
   usage?: Record<string, unknown> | null;
   turns: number;
   runIds: string[];
+  scheduledAt?: number | null; // when status === "scheduled": the future wake time
+  scheduledPrompt?: string | null;
+  notifications?: AgentNotification[];
+}
+
+export interface AgentNotification {
+  id: string;
+  kind: string; // e.g. "workflow_finished"
+  payload?: Record<string, unknown>;
+  createdAt: number;
+  delivered?: boolean;
 }
 
 export interface AgentEvent {

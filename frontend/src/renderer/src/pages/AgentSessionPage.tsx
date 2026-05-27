@@ -2,7 +2,7 @@ import { Link, useParams } from "react-router-dom";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
-import { jget, jpost, duration, timeAgo } from "@/lib/client";
+import { jget, jpost, duration, timeAgo, untilTime } from "@/lib/client";
 import type { AgentEvent, AgentSession } from "@/lib/types";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -126,6 +126,18 @@ export default function AgentSessionPage() {
             <span className="text-faint"> — send a message to retry/continue.</span>
           </div>
         )}
+        {s.status === "waiting" && (
+          <div className="max-w-[1000px] mt-2 text-[12.5px] rounded-lg px-3 py-2 flex items-center gap-2" style={{ background: "#f5a62312", color: "#f5c06a", border: "1px solid #4a3a1a" }}>
+            <Icon name="clock" size={13} />
+            <span><span className="font-medium">Paused</span> — a workflow it launched is still running; it keeps the profile and will be woken automatically when the run finishes.</span>
+          </div>
+        )}
+        {s.status === "scheduled" && (
+          <div className="max-w-[1000px] mt-2 text-[12.5px] rounded-lg px-3 py-2 flex items-center gap-2" style={{ background: "#9b8cff12", color: "#b9adff", border: "1px solid #322a55" }}>
+            <Icon name="clock" size={13} />
+            <span><span className="font-medium">Scheduled</span> — wakes {untilTime(s.scheduledAt)} to continue{s.scheduledPrompt ? `: “${s.scheduledPrompt}”` : ""}. The profile is free meanwhile.</span>
+          </div>
+        )}
       </div>
 
       {/* transcript — the only scrolling zone; auto-follows the agent */}
@@ -152,6 +164,8 @@ export default function AgentSessionPage() {
             <div className="text-[11px] text-faint mb-1.5 flex items-center gap-1.5">
               <Icon name="refresh" size={11} />
               {s.status === "done" ? "This turn is done — send a message to continue (the agent's thread is kept)."
+                : s.status === "waiting" ? "Paused on a running workflow — it'll wake itself when that finishes, or send a message to steer it now."
+                : s.status === "scheduled" ? `Scheduled to wake ${untilTime(s.scheduledAt)} — or send a message to continue it now.`
                 : `Session ${s.status} — send a message to reactivate and continue it.`}
             </div>
           )}

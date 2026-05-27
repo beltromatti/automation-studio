@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { StatusPill } from "./StatusPill";
 import { useRuns } from "./RunsProvider";
-import { timeAgo, duration } from "@/lib/client";
+import { timeAgo, duration, untilTime } from "@/lib/client";
 import type { Run } from "@/lib/types";
 
 const ACTIVE = ["running", "starting", "controlled"];
@@ -27,6 +27,7 @@ export function RunRow({ run }: { run: Run }) {
         </div>
         <div className="text-[11px] text-faint mono truncate">
           {run.id}
+          {run.status === "scheduled" && run.startAt && ` · starts ${untilTime(run.startAt)}${run.everySeconds ? `, repeats every ${Math.round(run.everySeconds / 60)}m` : ""}`}
           {run.startedAt && ` · took ${duration(run.startedAt, run.finishedAt)}`}
           {run.rows != null && ` · ${run.rows} rows`}
           {waiting && ` · waiting for ${run.profileName}`}
@@ -43,7 +44,7 @@ export function RunRow({ run }: { run: Run }) {
           {run.progress.collected}/{run.progress.total}
         </div>
       )}
-      <div className="text-[11px] text-faint shrink-0 w-20 text-right">{active ? duration(run.startedAt) : timeAgo(run.createdAt)}</div>
+      <div className="text-[11px] text-faint shrink-0 w-20 text-right">{run.status === "scheduled" ? untilTime(run.startAt) : active ? duration(run.startedAt) : timeAgo(run.createdAt)}</div>
       {run.watch && run.browserOpen && (
         <span className="text-[10px] px-1.5 py-0.5 rounded shrink-0" style={{ background: "#f5a62320", color: "#f5a623" }}>
           visible
