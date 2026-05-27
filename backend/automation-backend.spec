@@ -24,6 +24,11 @@ for pkg in [
 # ensure humanbrowser's injected JS is bundled
 datas += collect_data_files("humanbrowser", includes=["*.js"])
 
+# ship the built-in workflows' .py SOURCE (not just the compiled modules) so agents
+# can read it in the frozen build too — reading e.g. the LinkedIn workflow is how an
+# agent learns to drive a platform. workflow_source() reads these from sys._MEIPASS.
+datas += collect_data_files("automations", includes=["*.py"], include_py_files=True)
+
 a = Analysis(
     ["_pyi_entry.py"],
     pathex=[],

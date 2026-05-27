@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,8 +23,8 @@ USER_INDEX = USER_DIR / "workflows.json"
 @dataclass
 class WorkflowParam:
     name: str
-    label: str
-    type: str  # "string" | "number" | "boolean" | "select"
+    label: str = ""          # falls back to name when omitted (see _normalize_params)
+    type: str = "string"     # "string" | "number" | "boolean" | "select"
     required: bool = False
     default: Any = None
     placeholder: str = ""
@@ -266,6 +267,20 @@ def _slug(s: str) -> str:
     return _SLUG.sub("-", (s or "").lower()).strip("-") or "workflow"
 
 
+def _normalize_params(params: Any) -> list[dict]:
+    """Be forgiving about param specs agents/UI send: a name is enough — label
+    falls back to the name, type to 'string'. Drop anything without a name."""
+    out = []
+    for p in params or []:
+        if not isinstance(p, dict) or not str(p.get("name") or "").strip():
+            continue
+        q = {k: v for k, v in p.items() if k in WorkflowParam.__dataclass_fields__}
+        q.setdefault("label", q["name"])
+        q.setdefault("type", "string")
+        out.append(q)
+    return out
+
+
 def save_user_workflow(body: dict) -> dict:
     """Create or update a user/agent workflow: validate the code compiles and has
     main(), write the .py + index entry. Returns the public workflow."""
@@ -279,8 +294,13 @@ def save_user_workflow(body: dict) -> dict:
     USER_DIR.mkdir(parents=True, exist_ok=True)
     index = _load_index()
     wid = body.get("id") or _slug(body.get("name", "workflow"))
-    # don't collide with a built-in id
+    # Built-ins are read-only (contracts, code, name, settings — everything). If the
+    # caller targets a built-in id, fork to a fresh editable copy instead of
+    # overwriting — exactly what the human editor does. We report the fork so the
+    # caller (UI/agent) can surface it.
+    forked_from = None
     if any(w.id == wid for w in WORKFLOWS):
+        forked_from = wid
         wid = wid + "-user"
     existing = next((m for m in index if m["id"] == wid), None)
     file = (existing or {}).get("file") or f"{wid}.py"
@@ -289,14 +309,19 @@ def save_user_workflow(body: dict) -> dict:
         "id": wid, "name": body.get("name", wid), "description": body.get("description", ""),
         "icon": body.get("icon", "wand"), "profile": body.get("profile", "ephemeral"),
         "profileName": body.get("profileName"), "needsAuth": bool(body.get("needsAuth")),
-        "params": body.get("params", []), "outputContract": body.get("outputContract", []),
+        "params": _normalize_params(body.get("params", [])), "outputContract": body.get("outputContract", []),
         "inputContract": body.get("inputContract", []),
         "file": file, "createdBy": body.get("createdBy", "user"),
         "createdAt": (existing or {}).get("createdAt") or time.time(), "updatedAt": time.time(),
     }
     index = [m for m in index if m["id"] != wid] + [meta]
     USER_INDEX.write_text(json.dumps(index, indent=2))
-    return public_workflow(_def_from_meta(meta))
+    out = public_workflow(_def_from_meta(meta))
+    if forked_from:
+        out["copiedFromBuiltin"] = forked_from
+        out["warning"] = (f"'{forked_from}' is a built-in workflow and is read-only (its code, contracts, "
+                          f"name and settings can't be changed); saved as a new editable copy '{wid}' instead.")
+    return out
 
 
 def delete_user_workflow(wid: str) -> bool:
@@ -320,21 +345,49 @@ def user_workflow_source(wid: str) -> str | None:
     return p.read_text() if p.exists() else None
 
 
+def _read_builtin_source(module: str) -> str | None:
+    """The .py source of a built-in workflow module — works BOTH in dev and in the
+    frozen bundle (the spec ships ``automations/*.py`` as data, so the real source
+    sits next to the package / under ``sys._MEIPASS``). Reading built-in source is
+    a first-class feature: agents learn how to drive a platform (e.g. LinkedIn) by
+    reading these, so it must not silently return nothing in production."""
+    last = module.split(".")[-1]
+    candidates: list[Path] = []
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        candidates.append(Path(base) / "automations" / f"{last}.py")
+    try:
+        import importlib
+        m = importlib.import_module(module)
+        f = getattr(m, "__file__", None)
+        if f:
+            candidates.append(Path(f).with_suffix(".py"))
+    except Exception:
+        pass
+    for c in candidates:
+        try:
+            if c.exists():
+                return c.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    try:  # dev fallback
+        import importlib
+        import inspect
+        return inspect.getsource(importlib.import_module(module))
+    except Exception:
+        return None
+
+
 def workflow_source(wid: str) -> str | None:
-    """Source code of a workflow: the .py for user/agent workflows; best-effort the
-    module source for built-ins (available in dev; not in a frozen build)."""
+    """Source code of a workflow: the .py for user/agent workflows; the bundled
+    module source for built-ins (works in dev AND the frozen build)."""
     src = user_workflow_source(wid)
     if src is not None:
         return src
     w = next((x for x in WORKFLOWS if x.id == wid), None)
     if not w:
         return None
-    try:
-        import importlib
-        import inspect
-        return inspect.getsource(importlib.import_module(w.module))
-    except Exception:
-        return None  # frozen build: built-in source isn't shipped
+    return _read_builtin_source(w.module)
 
 
 def public_workflow(w: WorkflowDef) -> dict:

@@ -80,12 +80,31 @@ def _need_browser() -> dict | None:
     return None if CONTROL else {"error": "no browser: this agent has no owned browser session"}
 
 
+def _workflow_view(w: dict) -> dict:
+    return {"id": w["id"], "name": w["name"], "description": w["description"],
+            "builtin": w.get("builtin"), "createdBy": w.get("createdBy"),
+            "profile": w.get("profile"), "needsAuth": w.get("needsAuth"),
+            "params": [{"name": p["name"], "label": p.get("label"), "type": p["type"],
+                        "required": p.get("required", False), "default": p.get("default"),
+                        "help": p.get("help", ""), "options": p.get("options")} for p in w.get("params", [])],
+            "inputContract": w.get("inputContract", []), "outputContract": w.get("outputContract", [])}
+
+
 def t_list_workflows(_a):
     d = _api("GET", "/api/workflows")
-    return [{"id": w["id"], "name": w["name"], "description": w["description"],
-             "params": [{"name": p["name"], "type": p["type"], "required": p.get("required", False),
-                         "help": p.get("help", ""), "options": p.get("options")} for p in w["params"]],
-            "outputContract": w.get("outputContract", [])} for w in d.get("workflows", [])]
+    return [_workflow_view(w) for w in d.get("workflows", [])]
+
+
+def t_get_workflow(a):
+    wid = a["workflowId"]
+    d = _api("GET", "/api/workflows")
+    w = next((x for x in d.get("workflows", []) if x["id"] == wid), None)
+    if not w:
+        return {"error": f"no workflow '{wid}'"}
+    out = _workflow_view(w)
+    if a.get("includeSource", True):
+        out["source"] = _api("GET", f"/api/workflows/{wid}/source").get("source", "")
+    return out
 
 
 def t_list_datasets(_a):
@@ -131,8 +150,9 @@ def t_dataset_project(a):
 
 
 def t_create_workflow(a):
-    body = {k: a.get(k) for k in ("id", "name", "description", "code", "params", "outputContract",
-                                  "profile", "profileName", "needsAuth", "icon")}
+    body = {k: a.get(k) for k in ("id", "name", "description", "code", "params",
+                                  "outputContract", "inputContract", "profile", "profileName",
+                                  "needsAuth", "icon") if a.get(k) is not None}
     body["createdBy"] = "agent"
     return _api("POST", "/api/workflows", body)
 
@@ -450,8 +470,10 @@ def t_browser_current_url(_a):
 
 
 STUDIO_TOOLS = [
-    ("studio_list_workflows", "List the available workflows (with their params and output columns).",
+    ("studio_list_workflows", "List all workflows with their full settings: params (name/label/type/required/default/options), input & output contracts, profile, needsAuth, and whether each is a read-only built-in or a user/agent workflow.",
      {"type": "object", "properties": {}}, t_list_workflows),
+    ("studio_get_workflow", "Get one workflow's full settings AND its Python source code (set includeSource=false to skip). Reading a built-in's code is a great way to learn how to drive a platform — e.g. read the LinkedIn workflows to see exactly how the browser is navigated, then apply the same patterns yourself.",
+     {"type": "object", "properties": {"workflowId": {"type": "string"}, "includeSource": {"type": "boolean"}}, "required": ["workflowId"]}, t_get_workflow),
     ("studio_list_datasets", "List all persistent datasets (id, name, columns, dedup keys, row counts).",
      {"type": "object", "properties": {}}, t_list_datasets),
     ("studio_dataset_schema", "Get every dataset's physical SQL table name and columns, so you can write SQL for studio_query_data.",
@@ -475,13 +497,14 @@ STUDIO_TOOLS = [
     ("studio_dataset_project", "Create a new dataset from selected/renamed columns of another (prep a tidy input for the next workflow). columns: [{from,to}] or [name].",
      {"type": "object", "properties": {"srcId": {"type": "string"}, "columns": {"type": "array"},
                                        "name": {"type": "string"}, "dedupKeys": {"type": "array"}}, "required": ["srcId", "columns", "name"]}, t_dataset_project),
-    ("studio_create_workflow", "Create (or update) a reusable workflow from Python code. The code must define main(argv) and should use `from automations import userkit` (userkit.parse(argv) -> params,server,output; userkit.run_session(fn,params,server); userkit.write_csv(output,rows,columns); userkit.progress/log/error). params: [{name,label,type:string|number|boolean|select,default,help,options}]. outputContract: [{name,type}]. profile: 'ephemeral'|'shared'. Appears in the app like a built-in (tagged 'agent').",
+    ("studio_create_workflow", "Create — or update an existing user/agent workflow (pass its id) — a reusable workflow from Python code. The code must define main(argv) and should use `from automations import userkit` (userkit.parse(argv) -> params,server,output; userkit.input_rows(argv) for list-consuming workflows; userkit.run_session(fn,params,server); userkit.write_csv(output,rows,columns); userkit.progress/log/error). params: [{name,label,type:string|number|boolean|select,default,help,options}]. outputContract/inputContract: [{name,type}] (set inputContract to make it list-consuming/chainable). profile: 'ephemeral'|'shared'. Built-ins are READ-ONLY: passing a built-in's id forks an editable copy instead of overwriting (the result carries a `warning` + `copiedFromBuiltin`), exactly like the human editor.",
      {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"},
                                        "description": {"type": "string"}, "code": {"type": "string"},
                                        "params": {"type": "array"}, "outputContract": {"type": "array"},
+                                       "inputContract": {"type": "array"},
                                        "profile": {"type": "string"}, "needsAuth": {"type": "boolean"},
                                        "icon": {"type": "string"}}, "required": ["name", "code"]}, t_create_workflow),
-    ("studio_workflow_source", "Read the Python source of a user/agent workflow (to inspect or modify it).",
+    ("studio_workflow_source", "Read a workflow's Python source — works for user/agent AND built-in workflows. Use studio_get_workflow for source + settings together.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}}, "required": ["workflowId"]}, t_workflow_source),
     ("studio_run_workflow", "Start a workflow run. Defaults to this agent's own profile. Bind datasetId to auto-append the result on success. For list-consuming workflows (those with an input contract, e.g. url-titles), set inputDatasetId to feed a dataset of rows as input. Returns runId.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}, "params": {"type": "object"},
