@@ -2,11 +2,13 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { Icon } from "./Icon";
+import { useChromeGate } from "./DependencyModal";
 import { jget, jpost } from "@/lib/client";
 import type { Dataset, Profile, PublicWorkflow, Run } from "@/lib/types";
 
 export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const navigate = useNavigate();
+  const { guard, modal } = useChromeGate();
   const [values, setValues] = useState<Record<string, unknown>>(() => {
     const v: Record<string, unknown> = {};
     for (const p of workflow.params) v[p.name] = p.default ?? (p.type === "boolean" ? false : "");
@@ -109,7 +111,7 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
                 onChange={(e) =>
                   setValues((v) => ({ ...v, [p.name]: p.type === "number" ? Number(e.target.value) : e.target.value }))
                 }
-                onKeyDown={(e) => e.key === "Enter" && submit()}
+                onKeyDown={(e) => e.key === "Enter" && guard(submit)}
               />
             )}
             {p.help && <span className="text-[11px] text-faint">{p.help}</span>}
@@ -184,10 +186,11 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
 
         {error && <div className="text-[12px] text-danger">{error}</div>}
 
-        <button onClick={submit} disabled={busy || (consumesInput && !inputDatasetId)} className="btn btn-primary mt-1 self-start">
+        <button onClick={() => guard(submit)} disabled={busy || (consumesInput && !inputDatasetId)} className="btn btn-primary mt-1 self-start">
           <Icon name="play" size={14} /> {busy ? "Starting…" : "Run workflow"}
         </button>
       </div>
+      {modal}
     </div>
   );
 }

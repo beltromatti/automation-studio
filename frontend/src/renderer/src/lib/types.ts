@@ -170,9 +170,33 @@ export interface AgentEvent {
   server?: string;
 }
 
+export interface InstallInfo {
+  name: string;
+  url: string;
+  mac: string[];
+  win: string[];
+  linux: string[];
+  note?: string;
+}
+
 export interface EngineInfo {
   available: boolean;
   path: string | null;
+  install?: InstallInfo;
+}
+
+export interface ChromeInfo {
+  available: boolean;
+  path: string | null;
+  install: InstallInfo;
+}
+
+export type OSPlatform = "mac" | "win" | "linux";
+
+export interface SystemDeps {
+  platform: OSPlatform;
+  engines: Record<AgentEngine, EngineInfo>;
+  chrome: ChromeInfo;
 }
 
 // A browser profile: a self-contained, persistent browser environment (cookies,

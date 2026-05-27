@@ -52,6 +52,7 @@ class HumanBrowser:
         self.page: Page | None = None
         self._last_ctx: PageContext | None = None
         self.paused: bool = False
+        self.channel_used: str | None = None  # "chrome" | "bundled" — which browser actually launched
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -72,14 +73,23 @@ class HumanBrowser:
         # isn't installed (fresh machine), fall back to the bundled patchright
         # Chromium (PLAYWRIGHT_BROWSERS_PATH) so the app works everywhere. The UA
         # is normalised either way, so the observable fingerprint stays consistent.
-        try:
-            self.context = await self._pw.chromium.launch_persistent_context(
-                channel=self.cfg.channel, **launch_kwargs
-            )
-        except Exception:
-            if not self.cfg.channel:
-                raise
+        if self.cfg.channel:  # prefer system Chrome
+            try:
+                self.context = await self._pw.chromium.launch_persistent_context(
+                    channel=self.cfg.channel, **launch_kwargs
+                )
+                self.channel_used = "chrome"
+            except Exception as e:
+                # fresh machine / no system Chrome → fall back to the bundled Chromium
+                print(f"[browser] system Chrome unavailable ({type(e).__name__}); "
+                      f"falling back to the bundled Chromium", flush=True)
+                self.context = await self._pw.chromium.launch_persistent_context(**launch_kwargs)
+                self.channel_used = "bundled"
+        else:  # explicitly asked for the bundled browser
             self.context = await self._pw.chromium.launch_persistent_context(**launch_kwargs)
+            self.channel_used = "bundled"
+        print(f"[browser] launched on {'system Google Chrome' if self.channel_used == 'chrome' else 'the bundled Chromium'}",
+              flush=True)
         self.context.set_default_timeout(self.cfg.default_timeout_ms)
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         # keep "current page" pointed at whatever the user/automation focuses last
@@ -297,6 +307,7 @@ class HumanBrowser:
             "headless": self.cfg.headless,
             "humanize": self.cfg.humanize,
             "paused": self.paused,
+            "browser": self.channel_used,  # "chrome" | "bundled"
             "url": page.url if page else None,
             "title": (await page.title()) if page else None,
         }

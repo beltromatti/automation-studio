@@ -318,6 +318,14 @@ def create_app() -> FastAPI:
         from .agents import engine_status
         return {"engines": engine_status()}
 
+    @app.get("/api/system/deps")
+    async def system_deps():
+        """Status + install guidance for every external dependency (agent engines +
+        the browser). Cross-platform, fault-tolerant — used by the UI to gate
+        browser/agent actions and guide install when something is missing."""
+        from . import deps
+        return deps.deps_status()
+
     @app.get("/api/agents/sessions")
     async def agent_sessions():
         from .agents import get_agents

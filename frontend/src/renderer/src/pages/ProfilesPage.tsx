@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
+import { useChromeGate } from "@/components/DependencyModal";
 import { jget, jpost, jdel, timeAgo, formatBytes } from "@/lib/client";
 import type { Profile } from "@/lib/types";
 
 export default function ProfilesPage() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const { guard, modal } = useChromeGate();
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [busy, setBusy] = useState<string>(""); // id currently performing an action
@@ -136,6 +138,7 @@ export default function ProfilesPage() {
               onChange={load}
               onError={setError}
               act={act}
+              guard={guard}
             />
           ))}
           {profiles.length === 0 && (
@@ -146,6 +149,7 @@ export default function ProfilesPage() {
           )}
         </div>
       </div>
+      {modal}
     </>
   );
 }
@@ -157,6 +161,7 @@ function ProfileCard({
   onChange,
   onError,
   act,
+  guard,
 }: {
   profile: Profile;
   busy: boolean;
@@ -164,6 +169,7 @@ function ProfileCard({
   onChange: () => void;
   onError: (s: string) => void;
   act: (id: string, fn: () => Promise<unknown>) => Promise<void>;
+  guard: (action: () => void) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(p.name);
@@ -236,7 +242,7 @@ function ProfileCard({
           <button
             className="btn btn-secondary btn-sm"
             disabled={busy}
-            onClick={() => act(p.id, () => jpost(`/api/profiles/${p.id}/open`))}
+            onClick={() => guard(() => act(p.id, () => jpost(`/api/profiles/${p.id}/open`)))}
             title="Open a browser window to log in / set things up"
           >
             <Icon name="globe" size={13} /> {busy ? "Opening…" : "Open to log in"}

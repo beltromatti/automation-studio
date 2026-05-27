@@ -4,6 +4,7 @@ import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
 import { jget, jpost } from "@/lib/client";
 import { SessionRow } from "@/components/SessionRow";
+import { DependencyModal, useChromeGate } from "@/components/DependencyModal";
 import type { AgentDef, AgentEngine, AgentSession, EngineInfo, Profile } from "@/lib/types";
 
 export default function AgentLaunchPage() {
@@ -19,6 +20,8 @@ export default function AgentLaunchPage() {
   const [watch, setWatch] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [showEngineHelp, setShowEngineHelp] = useState(false);
+  const { guard, modal: chromeModal } = useChromeGate();
 
   useEffect(() => {
     jget<{ agents: AgentDef[] }>("/api/agents").then((d) => setAgent(d.agents.find((a) => a.id === id) ?? null)).catch(() => {});
@@ -117,10 +120,18 @@ export default function AgentLaunchPage() {
               <span className="text-[13px]">Watch the browser <span className="text-faint">— headed window during the session</span></span>
             </label>
 
-            {engineMissing && <div className="text-[12px] text-danger">{engine} is not installed/available on this machine.</div>}
+            {engineMissing && (
+              <div className="card p-3 flex items-center gap-2 text-[12px]" style={{ background: "#ff5c5c12", color: "#ff8d8d", borderColor: "#4a2424" }}>
+                <Icon name="alert" size={15} />
+                <span><b>{engine === "codex" ? "Codex" : "Claude Code"}</b> isn't installed on this machine.</span>
+                <button className="btn btn-secondary btn-sm ml-auto" onClick={() => setShowEngineHelp(true)}>
+                  <Icon name="download2" size={13} /> How to install
+                </button>
+              </div>
+            )}
             {error && <div className="text-[12px] text-danger">{error}</div>}
 
-            <button onClick={launch} disabled={busy || !prompt.trim() || !!engineMissing} className="btn btn-primary mt-1 self-start">
+            <button onClick={() => (wantsBrowser ? guard(launch) : launch())} disabled={busy || !prompt.trim() || !!engineMissing} className="btn btn-primary mt-1 self-start">
               <Icon name="play" size={14} /> {busy ? "Launching…" : "Launch agent"}
             </button>
           </div>
@@ -135,6 +146,10 @@ export default function AgentLaunchPage() {
           </div>
         )}
       </div>
+      {chromeModal}
+      {showEngineHelp && engines?.[engine]?.install && (
+        <DependencyModal kind="engine" install={engines[engine].install!} onClose={() => setShowEngineHelp(false)} />
+      )}
     </>
   );
 }

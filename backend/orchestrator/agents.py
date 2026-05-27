@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -49,26 +48,11 @@ CLAUDE_EFFORT = "max"        # claude: --effort (low|medium|high|max)
 
 
 def _find_binary(engine: str) -> str | None:
-    """Resolve the user's installed CLI. Finder-launched apps don't inherit the
-    shell PATH, so probe common install locations as well as PATH."""
-    name = engine
-    found = shutil.which(name)
-    if found:
-        return found
-    candidates = [
-        f"/opt/homebrew/bin/{name}", f"/usr/local/bin/{name}", f"/usr/bin/{name}",
-        os.path.expanduser(f"~/.local/bin/{name}"),
-        os.path.expanduser(f"~/.npm-global/bin/{name}"),
-    ]
-    # nvm installs (codex/claude often live under a node version)
-    nvm = os.path.expanduser("~/.nvm/versions/node")
-    if os.path.isdir(nvm):
-        for v in sorted(os.listdir(nvm), reverse=True):
-            candidates.append(os.path.join(nvm, v, "bin", name))
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    return None
+    """Resolve the user's installed engine CLI, cross-platform (delegates to the
+    central, fault-tolerant dependency gateway). Finder-launched apps don't inherit
+    the shell PATH, so it probes the standard install locations too."""
+    from . import deps
+    return deps.find_engine(engine)
 
 
 @dataclass
@@ -686,8 +670,9 @@ class AgentManager:
 
 
 def engine_status() -> dict:
-    """Which engines are installed/launchable on this machine (for the UI)."""
-    return {e: {"available": _find_binary(e) is not None, "path": _find_binary(e)} for e in ENGINES}
+    """Which engines are installed/launchable on this machine, with install help."""
+    from . import deps
+    return deps.engine_status()
 
 
 _agents: AgentManager | None = None

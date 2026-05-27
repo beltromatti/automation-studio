@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 APP_NAME = "AutomationStudio"
+_IS_WIN = os.name == "nt" or sys.platform.startswith("win")
+_IS_MAC = sys.platform == "darwin"
 
 
 def data_dir() -> Path:
@@ -42,17 +46,66 @@ DEFAULT_ARTIFACTS_DIR = data_dir() / "artifacts"
 CHROME_MAC = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
-def detect_chrome_major() -> int:
-    """Return the installed Google Chrome major version (best effort)."""
+def find_chrome() -> str | None:
+    """Locate the installed system Google Chrome (or Chromium), cross-platform and
+    fault-tolerant — probe the standard per-OS install locations and PATH. Returns
+    the executable path, or None if no system browser is found (→ the app falls
+    back to the bundled patchright Chromium). Never raises."""
+    def ok(p: str | None) -> bool:
+        try:
+            return bool(p) and os.path.exists(p)
+        except Exception:
+            return False
+
     try:
-        out = subprocess.run(
-            [CHROME_MAC, "--version"], capture_output=True, text=True, timeout=10
-        ).stdout
-        m = re.search(r"(\d+)\.\d+\.\d+\.\d+", out)
-        if m:
-            return int(m.group(1))
+        cands: list[str] = []
+        if _IS_MAC:
+            home = os.path.expanduser("~")
+            cands = [
+                CHROME_MAC,
+                f"{home}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            ]
+        elif _IS_WIN:
+            pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+            pfx = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+            local = os.environ.get("LOCALAPPDATA", "")
+            cands = [rf"{pf}\Google\Chrome\Application\chrome.exe",
+                     rf"{pfx}\Google\Chrome\Application\chrome.exe"]
+            if local:
+                cands.append(rf"{local}\Google\Chrome\Application\chrome.exe")
+        else:  # linux
+            for n in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
+                f = shutil.which(n)
+                if ok(f):
+                    return f
+            cands = ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable",
+                     "/opt/google/chrome/chrome", "/snap/bin/chromium",
+                     "/usr/bin/chromium-browser", "/usr/bin/chromium"]
+        for c in cands:
+            if ok(c):
+                return c
+        for n in ("google-chrome", "chrome", "chromium"):
+            f = shutil.which(n)
+            if ok(f):
+                return f
     except Exception:
         pass
+    return None
+
+
+def detect_chrome_major() -> int:
+    """Return the installed Google Chrome major version (best effort, cross-platform)."""
+    chrome = find_chrome()
+    if chrome:
+        try:
+            out = subprocess.run([chrome, "--version"], capture_output=True, text=True, timeout=10).stdout
+            m = re.search(r"(\d+)\.\d+\.\d+\.\d+", out)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
     return 148
 
 
