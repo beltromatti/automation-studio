@@ -18,6 +18,7 @@ export default function AgentLaunchPage() {
   const [engine, setEngine] = useState<AgentEngine>("codex");
   const [prompt, setPrompt] = useState("");
   const [watch, setWatch] = useState(false);
+  const [scheduleMin, setScheduleMin] = useState(0); // 0 = launch now; else minutes from now
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [showEngineHelp, setShowEngineHelp] = useState(false);
@@ -48,7 +49,8 @@ export default function AgentLaunchPage() {
     if (!prompt.trim()) return;
     setBusy(true); setError("");
     try {
-      const { session } = await jpost<{ session: AgentSession }>("/api/agents/sessions", { agentId: id, profileId, prompt, watch, engine });
+      const { session } = await jpost<{ session: AgentSession }>("/api/agents/sessions",
+        { agentId: id, profileId, prompt, watch, engine, inSeconds: scheduleMin > 0 ? scheduleMin * 60 : undefined });
       navigate(`/agents/sessions/${session.id}`);
     } catch (e) { setError(String((e as Error).message)); setBusy(false); }
   };
@@ -131,8 +133,15 @@ export default function AgentLaunchPage() {
             )}
             {error && <div className="text-[12px] text-danger">{error}</div>}
 
+            <label className="flex items-center gap-2 text-[13px] text-muted">
+              <Icon name="clock" size={14} /><span>Schedule:</span>
+              <input type="number" min={0} step={1} value={scheduleMin}
+                     onChange={(e) => setScheduleMin(Math.max(0, Number(e.target.value) || 0))}
+                     className="input" style={{ width: 72, height: 30 }} />
+              <span className="text-faint">{scheduleMin > 0 ? "minutes from now" : "minutes from now (0 = launch now)"}</span>
+            </label>
             <button onClick={() => (wantsBrowser ? guard(launch) : launch())} disabled={busy || !prompt.trim() || !!engineMissing} className="btn btn-primary mt-1 self-start">
-              <Icon name="play" size={14} /> {busy ? "Launching…" : "Launch agent"}
+              <Icon name={scheduleMin > 0 ? "clock" : "play"} size={14} /> {busy ? "Launching…" : scheduleMin > 0 ? `Schedule in ${scheduleMin}m` : "Launch agent"}
             </button>
           </div>
         </div>

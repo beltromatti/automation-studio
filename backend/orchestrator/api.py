@@ -16,6 +16,25 @@ from .registry import (all_workflows, get_workflow, public_workflow, save_user_w
 from . import datastore
 
 
+def _resolve_at(body: dict) -> float | None:
+    """A schedule time from a request: absolute `startAt`/`at` (unix seconds) or
+    relative `inSeconds` from now. None = run now."""
+    import time
+    at = body.get("startAt") if body.get("startAt") is not None else body.get("at")
+    if at is not None:
+        try:
+            return float(at)
+        except (TypeError, ValueError):
+            return None
+    secs = body.get("inSeconds")
+    if secs is not None:
+        try:
+            return time.time() + float(secs)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     mgr = get_manager()
@@ -81,7 +100,8 @@ def create_app() -> FastAPI:
         try:
             run = mgr.create(body["workflowId"], body.get("params") or {}, bool(body.get("watch")),
                              body.get("profileId") or "ephemeral", body.get("datasetId"),
-                             body.get("attachPort"), body.get("agentId"), body.get("inputDatasetId"))
+                             body.get("attachPort"), body.get("agentId"), body.get("inputDatasetId"),
+                             start_at=_resolve_at(body), every_seconds=body.get("everySeconds"))
             return {"run": mgr.get(run.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
@@ -348,10 +368,23 @@ def create_app() -> FastAPI:
         try:
             s = get_agents().launch(body["agentId"], body.get("profileId") or "ephemeral",
                                     body.get("prompt", ""), bool(body.get("watch")),
-                                    body.get("engine") or "codex")
+                                    body.get("engine") or "codex", start_at=_resolve_at(body))
             return {"session": get_agents().get_session(s.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.post("/api/agents/sessions/{sid}/schedule")
+    async def agent_schedule(sid: str, body: dict = Body(...)):
+        from .agents import get_agents
+        at = _resolve_at(body)
+        if at is None:
+            return JSONResponse({"error": "provide `inSeconds` or `at`/`startAt`"}, status_code=400)
+        return get_agents().schedule_wake(sid, at, body.get("prompt", ""))
+
+    @app.post("/api/agents/sessions/{sid}/cancel-schedule")
+    async def agent_cancel_schedule(sid: str):
+        from .agents import get_agents
+        return get_agents().cancel_schedule(sid)
 
     @app.get("/api/agents/sessions/{sid}")
     async def agent_session(sid: str):

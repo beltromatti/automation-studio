@@ -209,6 +209,33 @@ def t_list_runs(a):
             | {"progress": r.get("progress")} for r in runs]
 
 
+def t_schedule_workflow(a):
+    body = {"workflowId": a["workflowId"], "params": a.get("params", {}),
+            "profileId": a.get("profileId") or AGENT_PROFILE_ID,
+            "datasetId": a.get("datasetId"), "inputDatasetId": a.get("inputDatasetId"),
+            "agentId": AGENT_SESSION_ID or None,
+            "inSeconds": a.get("inSeconds"), "at": a.get("at"), "everySeconds": a.get("everySeconds")}
+    d = _api("POST", "/api/runs", body)
+    run = d.get("run") or {}
+    return {"runId": run.get("id"), "status": run.get("status"), "startAt": run.get("startAt"),
+            "everySeconds": run.get("everySeconds"), "error": d.get("error")}
+
+
+def t_schedule_wake(a):
+    if not AGENT_SESSION_ID:
+        return {"error": "no agent session bound"}
+    return _api("POST", f"/api/agents/sessions/{AGENT_SESSION_ID}/schedule",
+                {"inSeconds": a.get("inSeconds"), "at": a.get("at"), "prompt": a.get("prompt", "")})
+
+
+def t_cancel_schedule(a):
+    if a.get("runId"):
+        return _api("POST", f"/api/runs/{a['runId']}/cancel")
+    if not AGENT_SESSION_ID:
+        return {"error": "no agent session bound"}
+    return _api("POST", f"/api/agents/sessions/{AGENT_SESSION_ID}/cancel-schedule")
+
+
 def t_run_logs(a):
     d = _api("GET", f"/api/runs/{a['runId']}")
     logs = d.get("logs") or []
@@ -529,6 +556,15 @@ STUDIO_TOOLS = [
     ("studio_run_to_dataset", "Append a finished run's result into a dataset (new if no datasetId, else existing). The canonical way to capture a run's output into the persistent data layer.",
      {"type": "object", "properties": {"runId": {"type": "string"}, "datasetId": {"type": "string"},
                                        "name": {"type": "string"}, "dedupKeys": {"type": "array"}}, "required": ["runId"]}, t_run_to_dataset),
+    ("studio_schedule_workflow", "Schedule a workflow to run later (not now): set `inSeconds` (relative) or `at` (unix epoch seconds), and optionally `everySeconds` to repeat. It appears as a `scheduled` run, fires into the queue when due, then takes the profile lock normally. Same params as studio_run_workflow (params/profileId/inputDatasetId/datasetId). You'll be notified when each occurrence finishes, like any run you launch.",
+     {"type": "object", "properties": {"workflowId": {"type": "string"}, "params": {"type": "object"},
+                                       "profileId": {"type": "string"}, "inputDatasetId": {"type": "string"},
+                                       "datasetId": {"type": "string"}, "inSeconds": {"type": "number"},
+                                       "at": {"type": "number"}, "everySeconds": {"type": "number"}}, "required": ["workflowId"]}, t_schedule_workflow),
+    ("studio_schedule_wake", "Schedule YOURSELF to be woken later with a prompt (set `inSeconds` or `at`). End your turn after calling this; you'll rest as `scheduled` (releasing the profile so others can use it) and be re-activated at that time with the prompt. Use this to wait on something external, pace work, or come back to a task later.",
+     {"type": "object", "properties": {"inSeconds": {"type": "number"}, "at": {"type": "number"}, "prompt": {"type": "string"}}, "required": ["prompt"]}, t_schedule_wake),
+    ("studio_cancel_schedule", "Cancel a scheduled item: pass `runId` to cancel a scheduled workflow run, or no args to cancel your own pending scheduled wake.",
+     {"type": "object", "properties": {"runId": {"type": "string"}}}, t_cancel_schedule),
     ("studio_dataset_rename", "Rename a dataset.",
      {"type": "object", "properties": {"datasetId": {"type": "string"}, "name": {"type": "string"}}, "required": ["datasetId", "name"]}, t_dataset_rename),
     ("studio_dataset_delete", "Delete a dataset permanently.",

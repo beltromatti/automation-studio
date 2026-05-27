@@ -25,6 +25,7 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const [dest, setDest] = useState<string>(""); // "" none | dataset id | "__new__"
   const [newDsName, setNewDsName] = useState(`${workflow.name} results`);
   const [inputDatasetId, setInputDatasetId] = useState<string>("");
+  const [scheduleMin, setScheduleMin] = useState(0); // 0 = run now; else minutes from now
   const consumesInput = (workflow.inputContract ?? []).length > 0;
 
   useEffect(() => {
@@ -57,7 +58,8 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
       } else if (dest) {
         datasetId = dest;
       }
-      const { run } = await jpost<{ run: Run }>("/api/runs", { workflowId: workflow.id, params: values, watch, profileId, datasetId, inputDatasetId: inputDatasetId || undefined });
+      const { run } = await jpost<{ run: Run }>("/api/runs", { workflowId: workflow.id, params: values, watch, profileId, datasetId,
+        inputDatasetId: inputDatasetId || undefined, inSeconds: scheduleMin > 0 ? scheduleMin * 60 : undefined });
       navigate(`/runs/${run.id}`);
     } catch (e) {
       setError(String((e as Error).message));
@@ -184,10 +186,19 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
           <span className="text-[13px]">Watch live <span className="text-faint">— open the browser window during the run</span></span>
         </label>
 
+        <label className="flex items-center gap-2 text-[13px] text-muted">
+          <Icon name="clock" size={14} />
+          <span>Schedule:</span>
+          <input type="number" min={0} step={1} value={scheduleMin}
+                 onChange={(e) => setScheduleMin(Math.max(0, Number(e.target.value) || 0))}
+                 className="input" style={{ width: 72, height: 30 }} />
+          <span className="text-faint">{scheduleMin > 0 ? `minutes from now` : "minutes from now (0 = run now)"}</span>
+        </label>
+
         {error && <div className="text-[12px] text-danger">{error}</div>}
 
         <button onClick={() => guard(submit)} disabled={busy || (consumesInput && !inputDatasetId)} className="btn btn-primary mt-1 self-start">
-          <Icon name="play" size={14} /> {busy ? "Starting…" : "Run workflow"}
+          <Icon name={scheduleMin > 0 ? "clock" : "play"} size={14} /> {busy ? "Starting…" : scheduleMin > 0 ? `Schedule in ${scheduleMin}m` : "Run workflow"}
         </button>
       </div>
       {modal}

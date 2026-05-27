@@ -95,6 +95,7 @@ class AgentSession:
     # launched finished). Each: {id, kind, payload, createdAt, delivered}.
     notifications: list[dict] = field(default_factory=list)
     scheduledAt: float | None = None  # when status == "scheduled": the future wake time
+    scheduledPrompt: str | None = None  # the prompt to wake with at scheduledAt
 
 
 # ------------------------------------------------------------------ normalisation
@@ -402,7 +403,7 @@ class AgentManager:
         return self.events.get(sid, [])
 
     def launch(self, agent_id: str, profile_id: str, prompt: str, watch: bool = False,
-               engine: str = "codex") -> AgentSession:
+               engine: str = "codex", start_at: float | None = None) -> AgentSession:
         d = self.defs.get(agent_id)
         if not d:
             raise ValueError(f"unknown agent: {agent_id}")
@@ -423,13 +424,21 @@ class AgentManager:
                 raise ValueError(f"unknown profile: {profile_id}")
             profile_name = prof["name"]
         sid = uuid.uuid4().hex[:8]
+        scheduled = bool(start_at) and start_at > time.time() + 1
         s = AgentSession(id=sid, agentId=agent_id, agentName=d.name, engine=engine, scopes=d.scopes,
-                         profileId=profile_id, profileName=profile_name, prompt=prompt, status="starting",
-                         createdAt=time.time(), watch=bool(watch))
+                         profileId=profile_id, profileName=profile_name, prompt=prompt,
+                         status="scheduled" if scheduled else "starting",
+                         createdAt=time.time(), watch=bool(watch),
+                         scheduledAt=(start_at if scheduled else None),
+                         scheduledPrompt=(prompt if scheduled else None))
         self.sessions[sid] = s
         self.events[sid] = []
+        if scheduled:
+            when = max(0, int(start_at - time.time()))
+            self._emit(sid, {"kind": "system", "text": f"⏰ scheduled to start in ~{when}s"})
         self._save_sessions()
-        asyncio.create_task(self._run_turn(s, prompt, resume=False))
+        if not scheduled:                # future launches are fired by the Timeline
+            asyncio.create_task(self._run_turn(s, prompt, resume=False))
         return s
 
     def steer(self, sid: str, message: str) -> dict:
@@ -453,6 +462,8 @@ class AgentManager:
             return {"ok": True}
         s.status = "canceled"             # signals a queued-acquire loop to abort
         s.pendingSteers.clear()
+        s.scheduledAt = None              # a stopped session never re-fires
+        s.scheduledPrompt = None
         proc = self.procs.get(sid)
         if proc and proc.pid:
             kill_tree(proc.pid)
@@ -543,6 +554,51 @@ class AgentManager:
             n["delivered"] = True
         self._save_sessions()
         await self._run_turn(s, self._wake_prompt(notes), resume=True)
+
+    # ------------------------------------------------------------------ scheduling (Timeline)
+    def schedule_wake(self, sid: str, at: float, prompt: str) -> dict:
+        """Schedule a future wake for an agent session with a prompt. Recorded on the
+        session; when the current turn ends the session rests as `scheduled` (lock
+        released, behaves like done) and the Timeline wakes it at `at`. If the agent
+        is already at rest, it flips to `scheduled` immediately."""
+        s = self.sessions.get(sid)
+        if not s:
+            return {"ok": False, "error": "no such session"}
+        s.scheduledAt = float(at)
+        s.scheduledPrompt = prompt or "Scheduled wake — continue your task."
+        when = max(0, int(at - time.time()))
+        self._emit(sid, {"kind": "system", "text": f"⏰ scheduled a wake in ~{when}s"})
+        if s.status not in _RUNNING and s.status != "canceled":
+            s.status = "scheduled"            # at rest already → reflect it now
+            self._emit(sid, {"kind": "status", "status": "scheduled"})
+        self._save_sessions()
+        return {"ok": True, "at": s.scheduledAt}
+
+    def cancel_schedule(self, sid: str) -> dict:
+        s = self.sessions.get(sid)
+        if not s:
+            return {"ok": False, "error": "no such session"}
+        s.scheduledAt = None
+        s.scheduledPrompt = None
+        if s.status == "scheduled":
+            s.status = "done"
+            self._emit(sid, {"kind": "status", "status": "done"})
+        self._save_sessions()
+        return {"ok": True}
+
+    def fire_due_wakes(self) -> None:
+        """Timeline tick (driven by the RunManager loop): wake scheduled sessions
+        whose time has come — re-queues for the profile lock like a fresh launch."""
+        now = time.time()
+        for s in list(self.sessions.values()):
+            if s.status == "scheduled" and s.scheduledAt and s.scheduledAt <= now:
+                prompt = s.scheduledPrompt or "Scheduled wake — continue your task."
+                s.scheduledAt = None
+                s.scheduledPrompt = None
+                # resume the native thread if there is one (a normal wake); for a
+                # scheduled first launch there's no thread yet → fresh turn.
+                self._save_sessions()
+                asyncio.create_task(self._run_turn(s, prompt, resume=bool(s.threadId)))
 
     # ------------------------------------------------------------------ ownership
     async def _ensure_browser(self, s: AgentSession) -> None:
@@ -718,6 +774,11 @@ class AgentManager:
             s.status = "waiting"   # keep the browser/profile lock; woken on completion
             self._emit(s.id, {"kind": "system",
                               "text": "⏸ turn ended with a workflow still running — paused; you'll be woken when it finishes"})
+        elif s.scheduledAt and s.scheduledAt > time.time():
+            await self._release_browser(s)   # behaves like done; Timeline re-queues at scheduledAt
+            s.status = "scheduled"
+            when = max(0, int(s.scheduledAt - time.time()))
+            self._emit(s.id, {"kind": "system", "text": f"⏰ turn ended — scheduled to wake in ~{when}s"})
         else:
             await self._release_browser(s)
             s.status = "done"

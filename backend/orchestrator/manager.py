@@ -34,6 +34,7 @@ MAX_LOG_LINES = 600
 # runs can't spawn unbounded Chrome processes and panic the OS.
 GLOBAL_SAFETY_CAP = 8
 REAP_INTERVAL = 10  # seconds
+TIMELINE_INTERVAL = 3  # seconds — how often the Timeline checks for due scheduled items
 TERMINAL = {"succeeded", "failed", "canceled"}
 ACTIVE = {"starting", "running", "controlled"}
 # The special "ephemeral" profile: a fresh throwaway dir per run, deleted after.
@@ -104,6 +105,8 @@ class Run:
     attachPort: int | None = None  # if set, attach to an agent's existing control-server (shared browser)
     agentId: str | None = None     # the agent session that launched this run, if any
     inputDatasetId: str | None = None  # a dataset fed as the run's input list (list-consuming workflows)
+    startAt: float | None = None   # when status == "scheduled": fire (→ queued) at this time
+    everySeconds: float | None = None  # recurring: re-arm the next occurrence on fire
 
 
 class RunManager:
@@ -120,6 +123,7 @@ class RunManager:
         self.settings = {"maxConcurrency": 1}
         self._http: aiohttp.ClientSession | None = None
         self._reaper_task: asyncio.Task | None = None
+        self._timeline_task: asyncio.Task | None = None
         self.reap_strays(startup=True)
         self._load()
 
@@ -127,10 +131,12 @@ class RunManager:
     async def start(self) -> None:
         self._http = aiohttp.ClientSession()
         self._reaper_task = asyncio.create_task(self._reaper_loop())
+        self._timeline_task = asyncio.create_task(self._timeline_loop())
 
     async def stop(self) -> None:
-        if self._reaper_task:
-            self._reaper_task.cancel()
+        for t in (self._reaper_task, getattr(self, "_timeline_task", None)):
+            if t:
+                t.cancel()
         self.kill_all()
         if self._http:
             await self._http.close()
@@ -142,6 +148,54 @@ class RunManager:
                 self.reap_strays(startup=False)
         except asyncio.CancelledError:
             pass
+
+    async def _timeline_loop(self) -> None:
+        """The Timeline: the time-based trigger engine. On a tight cadence it
+        releases due scheduled runs into the queue (where the Studio Scheduler then
+        grants the profile lock) and wakes due scheduled agents. Distinct from the
+        Studio Scheduler (schedule(), which allocates locks); this only deals with
+        WHEN, not WHO-gets-the-profile."""
+        try:
+            while True:
+                await asyncio.sleep(TIMELINE_INTERVAL)
+                try:
+                    self.fire_due_runs()
+                except Exception:
+                    pass
+                try:
+                    from .agents import get_agents
+                    get_agents().fire_due_wakes()
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    def fire_due_runs(self) -> None:
+        """Release scheduled runs whose time has come into the queue; re-arm
+        recurring ones for their next occurrence."""
+        now = time.time()
+        fired = False
+        for run in list(self.runs.values()):
+            if run.status != "scheduled" or not run.startAt or run.startAt > now:
+                continue
+            if run.everySeconds and run.everySeconds > 0:
+                # re-arm the next occurrence at a steady cadence from the planned time
+                nxt = run.startAt + run.everySeconds
+                while nxt <= now:
+                    nxt += run.everySeconds
+                try:
+                    self.create(run.workflowId, run.params, watch=run.watch, profile_id=run.profileId,
+                                dataset_id=run.datasetId, agent_id=run.agentId,
+                                input_dataset_id=run.inputDatasetId, start_at=nxt,
+                                every_seconds=run.everySeconds)
+                except Exception:
+                    pass
+                run.everySeconds = None  # this occurrence is now a one-shot
+            run.status = "queued"
+            fired = True
+        if fired:
+            self._save()
+            self.schedule()
 
     def kill_all(self) -> None:
         for p in self.procs.values():
@@ -328,7 +382,9 @@ class RunManager:
                         if isinstance(v, (int, float)) and v > 1e11:
                             setattr(r, attr, v / 1000.0)
                             migrated = True
-                    if r.status not in TERMINAL:
+                    if r.status == "scheduled":
+                        pass  # future scheduled run survives a restart; the Timeline re-fires it
+                    elif r.status not in TERMINAL:
                         r.status = "failed"
                         r.error = r.error or "interrupted (backend restarted)"
                         r.browserOpen = False
@@ -397,7 +453,8 @@ class RunManager:
     def create(self, workflow_id: str, params: dict, watch: bool = False,
                profile_id: str = "ephemeral", dataset_id: str | None = None,
                attach_port: int | None = None, agent_id: str | None = None,
-               input_dataset_id: str | None = None) -> Run:
+               input_dataset_id: str | None = None, start_at: float | None = None,
+               every_seconds: float | None = None) -> Run:
         from .registry import get_workflow
         from . import profiles
         wf = get_workflow(workflow_id)
@@ -414,15 +471,21 @@ class RunManager:
                 raise ValueError(f"unknown profile: {profile_id}")
             profile_name = prof["name"]
         rid = uuid.uuid4().hex[:8]
+        # A future start time parks the run as "scheduled" — the Timeline flips it to
+        # "queued" when due, then the Studio Scheduler grants the profile lock as
+        # normal. A scheduled run holds no lock (it isn't ACTIVE) until it fires.
+        scheduled = bool(start_at) and start_at > time.time() + 1
         run = Run(id=rid, workflowId=workflow_id, workflowName=wf.name, params=params,
-                  status="queued", watch=bool(watch), createdAt=time.time(),
+                  status="scheduled" if scheduled else "queued", watch=bool(watch), createdAt=time.time(),
                   profileKey=profile_id, profileId=profile_id, profileName=profile_name,
                   datasetId=dataset_id or None, attachPort=attach_port or None, agentId=agent_id or None,
-                  inputDatasetId=input_dataset_id or None)
+                  inputDatasetId=input_dataset_id or None,
+                  startAt=(start_at if scheduled else None), everySeconds=every_seconds or None)
         self.runs[rid] = run
         (RUNS_DIR / rid).mkdir(parents=True, exist_ok=True)
         self._save()
-        self.schedule()
+        if not scheduled:
+            self.schedule()
         return run
 
     async def cancel(self, rid: str) -> None:
