@@ -14,6 +14,7 @@ export default function AgentLaunchPage() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [profileId, setProfileId] = useState("ephemeral");
+  const [engine, setEngine] = useState<AgentEngine>("codex");
   const [prompt, setPrompt] = useState("");
   const [watch, setWatch] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -21,7 +22,10 @@ export default function AgentLaunchPage() {
 
   useEffect(() => {
     jget<{ agents: AgentDef[] }>("/api/agents").then((d) => setAgent(d.agents.find((a) => a.id === id) ?? null)).catch(() => {});
-    jget<{ engines: Record<AgentEngine, EngineInfo> }>("/api/agents/engines").then((d) => setEngines(d.engines)).catch(() => {});
+    jget<{ engines: Record<AgentEngine, EngineInfo> }>("/api/agents/engines").then((d) => {
+      setEngines(d.engines);
+      setEngine(d.engines.codex?.available ? "codex" : d.engines.claude?.available ? "claude" : "codex");
+    }).catch(() => {});
     jget<{ profiles: Profile[] }>("/api/profiles").then((d) => setProfiles(d.profiles)).catch(() => {});
     const load = () => jget<{ sessions: AgentSession[] }>("/api/agents/sessions").then((d) => setSessions(d.sessions.filter((s) => s.agentId === id))).catch(() => {});
     load();
@@ -30,7 +34,7 @@ export default function AgentLaunchPage() {
   }, [id]);
 
   const wantsBrowser = !!agent?.scopes.includes("browser");
-  const engineMissing = agent && engines && !engines[agent.engine]?.available;
+  const engineMissing = !!(engines && !engines[engine]?.available);
 
   // browser agents need a persistent profile; default off ephemeral
   useEffect(() => {
@@ -41,7 +45,7 @@ export default function AgentLaunchPage() {
     if (!prompt.trim()) return;
     setBusy(true); setError("");
     try {
-      const { session } = await jpost<{ session: AgentSession }>("/api/agents/sessions", { agentId: id, profileId, prompt, watch });
+      const { session } = await jpost<{ session: AgentSession }>("/api/agents/sessions", { agentId: id, profileId, prompt, watch, engine });
       navigate(`/agents/sessions/${session.id}`);
     } catch (e) { setError(String((e as Error).message)); setBusy(false); }
   };
@@ -58,7 +62,6 @@ export default function AgentLaunchPage() {
             <Link to="/agents" className="text-muted hover:text-fg">Agents</Link>
             <Icon name="chevronRight" size={14} />
             {agent.name}
-            <span className="text-[10px] px-1.5 py-0.5 rounded text-faint" style={{ background: "#161616" }}>{agent.engine}</span>
             {agent.scopes.includes("browser") && <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#f5a62318", color: "#f5a623" }}>browser</span>}
           </span>
         }
@@ -75,6 +78,19 @@ export default function AgentLaunchPage() {
               <textarea className="input" style={{ height: 96, padding: 11, lineHeight: 1.5 }} autoFocus
                         placeholder={"Tell the agent what to do — e.g. “Run LinkedIn People for data engineers in Milan, capture into a dataset, dedup by profile URL, then project the links into a connect-input dataset.”"}
                         value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="label">Engine</label>
+              <div className="relative flex items-center">
+                <span className="absolute left-3 pointer-events-none text-faint"><Icon name="sparkles" size={14} /></span>
+                <select className="input appearance-none" style={{ paddingLeft: 32 }} value={engine} onChange={(e) => setEngine(e.target.value as AgentEngine)}>
+                  <option value="codex" disabled={!!(engines && !engines.codex.available)}>Codex{engines && !engines.codex.available ? " — not installed" : ""}</option>
+                  <option value="claude" disabled={!!(engines && !engines.claude.available)}>Claude Code{engines && !engines.claude.available ? " — not installed" : ""}</option>
+                </select>
+                <Icon name="chevronRight" size={14} className="absolute right-3 rotate-90 pointer-events-none text-faint" />
+              </div>
+              <span className="text-[11px] text-faint">Chosen per session — the same agent can run on either engine.</span>
             </div>
 
             <div className="flex flex-col gap-1.5">
@@ -101,7 +117,7 @@ export default function AgentLaunchPage() {
               <span className="text-[13px]">Watch the browser <span className="text-faint">— headed window during the session</span></span>
             </label>
 
-            {engineMissing && <div className="text-[12px] text-danger">{agent.engine} is not installed/available on this machine.</div>}
+            {engineMissing && <div className="text-[12px] text-danger">{engine} is not installed/available on this machine.</div>}
             {error && <div className="text-[12px] text-danger">{error}</div>}
 
             <button onClick={launch} disabled={busy || !prompt.trim() || !!engineMissing} className="btn btn-primary mt-1 self-start">

@@ -73,9 +73,10 @@ def _find_binary(engine: str) -> str | None:
 
 @dataclass
 class AgentDef:
+    # An agent is engine-agnostic: the engine (codex|claude) is chosen per session
+    # at launch, not baked into the definition.
     id: str
     name: str
-    engine: str                       # "codex" | "claude"
     icon: str = "sparkles"
     description: str = ""             # optional, human-facing (shown on the card)
     systemPrompt: str = ""            # the agent's skills / role (injected)
@@ -272,14 +273,14 @@ class AgentManager:
     def _seed(self) -> None:
         now = time.time()
         seeds = [
-            AgentDef(id="studio-ops", name="Studio Operator", engine="codex", icon="sparkles", builtin=True,
+            AgentDef(id="studio-ops", name="Studio Operator", icon="sparkles", builtin=True,
                      scopes=["studio"], createdAt=now,
                      description="Runs and chains your workflows and curates the data layer — capture run "
                      "results into datasets, dedup, and project tidy inputs for the next step.",
                      systemPrompt="You operate Automation Studio. Use the studio_ tools to inspect workflows, "
                      "run them, and read/clean/combine datasets. Prefer datasets for anything multi-step: capture "
                      "run results, dedup, project columns to prep the next workflow's input. Be concise."),
-            AgentDef(id="browser-pilot", name="Browser Pilot", engine="codex", icon="globe", builtin=True,
+            AgentDef(id="browser-pilot", name="Browser Pilot", icon="globe", builtin=True,
                      scopes=["studio", "browser"], createdAt=now,
                      description="Drives a real browser for you and can launch workflows on the same session — "
                      "observe the page, click, type and extract like a careful human, step by step.",
@@ -343,11 +344,8 @@ class AgentManager:
         return [asdict(d) for d in sorted(self.defs.values(), key=lambda d: d.createdAt)]
 
     def create_def(self, body: dict) -> dict:
-        engine = body.get("engine", "codex")
-        if engine not in ENGINES:
-            raise ValueError(f"unknown engine: {engine}")
         did = uuid.uuid4().hex[:8]
-        d = AgentDef(id=did, name=body.get("name", "Agent"), engine=engine,
+        d = AgentDef(id=did, name=body.get("name", "Agent"),
                      icon=body.get("icon", "sparkles"), description=body.get("description", ""),
                      systemPrompt=body.get("systemPrompt", ""),
                      scopes=body.get("scopes") or ["studio"], createdAt=time.time())
@@ -359,7 +357,7 @@ class AgentManager:
         d = self.defs.get(did)
         if not d:
             return None
-        for k in ("name", "engine", "icon", "description", "systemPrompt", "scopes"):
+        for k in ("name", "icon", "description", "systemPrompt", "scopes"):
             if k in body:
                 setattr(d, k, body[k])
         self._save_defs()
@@ -383,12 +381,16 @@ class AgentManager:
     def get_events(self, sid: str) -> list[dict]:
         return self.events.get(sid, [])
 
-    def launch(self, agent_id: str, profile_id: str, prompt: str, watch: bool = False) -> AgentSession:
+    def launch(self, agent_id: str, profile_id: str, prompt: str, watch: bool = False,
+               engine: str = "codex") -> AgentSession:
         d = self.defs.get(agent_id)
         if not d:
             raise ValueError(f"unknown agent: {agent_id}")
-        if not _find_binary(d.engine):
-            raise ValueError(f"{d.engine} CLI not found — install it and sign in to use this agent")
+        engine = (engine or "codex").strip().lower()
+        if engine not in ENGINES:
+            raise ValueError(f"unknown engine: {engine}")
+        if not _find_binary(engine):
+            raise ValueError(f"{engine} CLI not found — install it and sign in to use this agent")
         from . import profiles
         wants_browser = "browser" in d.scopes
         if is_ephemeral(profile_id):
@@ -401,7 +403,7 @@ class AgentManager:
                 raise ValueError(f"unknown profile: {profile_id}")
             profile_name = prof["name"]
         sid = uuid.uuid4().hex[:8]
-        s = AgentSession(id=sid, agentId=agent_id, agentName=d.name, engine=d.engine, scopes=d.scopes,
+        s = AgentSession(id=sid, agentId=agent_id, agentName=d.name, engine=engine, scopes=d.scopes,
                          profileId=profile_id, profileName=profile_name, prompt=prompt, status="starting",
                          createdAt=time.time(), watch=bool(watch))
         self.sessions[sid] = s

@@ -122,10 +122,10 @@ export interface DatasetRows {
 export type AgentEngine = "codex" | "claude";
 export type AgentStatus = "starting" | "queued" | "running" | "done" | "failed" | "canceled";
 
+// An agent is engine-agnostic — the engine (codex|claude) is chosen per session at launch.
 export interface AgentDef {
   id: string;
   name: string;
-  engine: AgentEngine;
   icon: string;
   description?: string; // optional, human-facing
   systemPrompt: string;

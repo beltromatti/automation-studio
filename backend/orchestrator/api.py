@@ -328,7 +328,8 @@ def create_app() -> FastAPI:
         from .agents import get_agents
         try:
             s = get_agents().launch(body["agentId"], body.get("profileId") or "ephemeral",
-                                    body.get("prompt", ""), bool(body.get("watch")))
+                                    body.get("prompt", ""), bool(body.get("watch")),
+                                    body.get("engine") or "codex")
             return {"session": get_agents().get_session(s.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
