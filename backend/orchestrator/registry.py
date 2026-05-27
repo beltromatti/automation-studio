@@ -211,6 +211,38 @@ WORKFLOWS: list[WorkflowDef] = [
         output_contract=[{"name": "profile_url", "type": "text"}, {"name": "name", "type": "text"},
                          {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
     ),
+    # List-consuming outreach workflow: message each 1st-degree CONNECTION. The third
+    # half of the people→connect→message pipeline — feed it any dataset with a
+    # profile_url column. Connection-gated (never messages non-connections / pending),
+    # drives the shadow-DOM compose overlay, and can alternate across several messages.
+    WorkflowDef(
+        id="linkedin-messages",
+        name="LinkedIn Messages",
+        description="Takes a list of LinkedIn profiles and sends a direct message to each one that is a "
+        "1st-degree connection, one at a time and human-paced. Skips non-connections and pending invites "
+        "(no message), and reports why anyone else couldn't be messaged. Accepts one message or several to "
+        "alternate between. Output is the input list with a status column. Uses your logged-in profile.",
+        icon="send",
+        module="automations.linkedin_messages",
+        profile="shared",
+        profile_name="default",
+        needs_auth=True,
+        params=[
+            WorkflowParam("message", "Message", "string", placeholder="Ciao! Volevo mettermi in contatto…",
+                          help="The message to send to each connection. Keep it human and simple."),
+            WorkflowParam("messages", "Messages to alternate", "string", default="",
+                          help="Optional. Several messages to rotate through (round-robin across the "
+                               "messages actually sent) — separate them with || (or paste a JSON array). "
+                               "When set, this overrides the single Message above."),
+            WorkflowParam("maxMessages", "Max messages this run", "number", default=0,
+                          help="Safety cap on how many messages to actually send (0 = no cap). "
+                               "Non-connections / pending / can't-message profiles don't count."),
+        ],
+        build_argv=lambda p: ["--params-json", json.dumps(p)],
+        input_contract=[{"name": "profile_url", "type": "text"}],
+        output_contract=[{"name": "profile_url", "type": "text"}, {"name": "name", "type": "text"},
+                         {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
+    ),
 ]
 
 
