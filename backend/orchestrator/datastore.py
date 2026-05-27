@@ -149,15 +149,32 @@ def _norm_type(t: str | None) -> str:
 
 def _normalize_columns(columns: list[dict | str]) -> list[dict]:
     """Accept ['Name', {'name':'Rank','type':'number'}, ...] → canonical column
-    specs with sanitised physical names. ``name``/``display`` are user-facing."""
+    specs with sanitised physical names. ``name``/``display`` are user-facing.
+
+    Be forgiving but never silently corrupt: a JSON-string array (callers/agents
+    sometimes send one) is parsed; anything that isn't a list of strings/objects
+    is REJECTED with a clear error (so we never iterate a JSON string character by
+    character into garbage columns)."""
+    if isinstance(columns, str):
+        s = columns.strip()
+        try:
+            columns = json.loads(s) if s else []
+        except ValueError:
+            raise ValueError("columns must be an array of {name, type} (got a string that isn't JSON)")
+    if columns is None:
+        columns = []
+    if not isinstance(columns, (list, tuple)):
+        raise ValueError("columns must be an array of {name, type} objects (or column-name strings)")
     out: list[dict] = []
     taken: set[str] = set()
     for col in columns:
         if isinstance(col, str):
             display, typ = col, "text"
-        else:
+        elif isinstance(col, dict):
             display = col.get("display") or col.get("name") or "col"
             typ = col.get("type")
+        else:
+            raise ValueError(f"each column must be a name string or a {{name, type}} object, got {type(col).__name__}")
         out.append({"display": str(display), "name": _sanitize(str(display), taken),
                     "type": _norm_type(typ)})
     return out

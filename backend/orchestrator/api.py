@@ -190,9 +190,12 @@ def create_app() -> FastAPI:
 
     @app.post("/api/datasets")
     async def datasets_create(body: dict = Body(...)):
-        ds = datastore.create_dataset(body.get("name", "Untitled"), body.get("columns") or [],
-                                      body.get("dedupKeys"), body.get("source"), body.get("rows"))
-        return {"dataset": ds}
+        try:
+            ds = datastore.create_dataset(body.get("name", "Untitled"), body.get("columns") or [],
+                                          body.get("dedupKeys"), body.get("source"), body.get("rows"))
+            return {"dataset": ds}
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
 
     @app.post("/api/datasets/project")
     async def datasets_project(body: dict = Body(...)):

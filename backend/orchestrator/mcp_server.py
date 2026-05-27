@@ -646,6 +646,26 @@ def _tool_defs() -> list[dict]:
 
 
 _HANDLERS = {n: f for (n, _d, _s, f) in (STUDIO_TOOLS + BROWSER_TOOLS)}
+_SCHEMAS = {n: s for (n, _d, s, _f) in (STUDIO_TOOLS + BROWSER_TOOLS)}
+
+
+def _coerce_args(name: str, args: dict) -> dict:
+    """Be forgiving about how the engine serialized arguments. Claude/Codex
+    sometimes send an array/object parameter as a JSON *string* (e.g. columns as
+    '[{"name":"title","type":"text"}]'). For any property the tool's schema
+    declares as array/object, parse a JSON-looking string into the real value —
+    so a tool never receives a string where it expects a list (which silently
+    corrupted datasets char-by-char before)."""
+    props = (_SCHEMAS.get(name) or {}).get("properties") or {}
+    for k, v in list(args.items()):
+        if isinstance(v, str) and (props.get(k) or {}).get("type") in ("array", "object"):
+            s = v.strip()
+            if s[:1] in ("[", "{"):
+                try:
+                    args[k] = json.loads(s)
+                except (ValueError, TypeError):
+                    pass
+    return args
 
 
 # ---------------------------------------------------------------------- JSON-RPC
@@ -686,7 +706,7 @@ def _handle(msg: dict) -> None:
             _result(rid, {"content": [{"type": "text", "text": f"unknown tool: {name}"}], "isError": True})
             return
         try:
-            out = fn(args)
+            out = fn(_coerce_args(name, args))
             text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, default=str)
             is_err = isinstance(out, dict) and bool(out.get("error"))
             _result(rid, {"content": [{"type": "text", "text": text}], "isError": is_err})
