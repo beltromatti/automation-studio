@@ -179,7 +179,25 @@ def _norm_claude(obj: dict) -> list[dict]:
         if obj.get("result") and obj.get("subtype") != "success":
             out.append({"kind": "error", "text": str(obj.get("result"))[:500]})
     elif t == "rate_limit_event":
-        out.append({"kind": "status", "status": "rate-limited"})
+        # Claude Code streams this EVERY turn to report your subscription window;
+        # status "allowed" is the normal case (NOT a throttle) — stay silent. Only
+        # surface it when you're actually warned or blocked, with the reset time.
+        info = obj.get("rate_limit_info") or {}
+        st = (info.get("status") or "").lower()
+        if st and st != "allowed":
+            ra = info.get("resetsAt")
+            when = ""
+            if isinstance(ra, (int, float)):
+                try:
+                    when = " — resets " + time.strftime("%a %H:%M", time.localtime(ra))
+                except Exception:
+                    when = ""
+            kind = (info.get("rateLimitType") or "usage").replace("_", "-")
+            if st in ("rejected", "blocked", "exceeded"):
+                out.append({"kind": "status", "status": "rate-limited"})
+                out.append({"kind": "system", "text": f"Claude {kind} usage limit reached{when}."})
+            else:  # e.g. allowed_warning — approaching the limit, not blocked
+                out.append({"kind": "system", "text": f"Approaching your Claude {kind} usage limit{when}."})
     return out
 
 
