@@ -448,14 +448,24 @@ _EXTRACT_JS = r"""(() => {
     try { items = Array.from(document.querySelectorAll(CONTAINER)); }
     catch (e) { return { error: 'invalid container selector: ' + CONTAINER }; }
   } else {
-    // auto: the SMALLEST repeating sibling group — the parent whose direct children
-    // repeat the most with the same tag.class signature (that's the listing grid;
-    // its children are the rows). Avoids grabbing a giant page wrapper.
+    // auto: the largest group of repeating CONTENT siblings — the parent whose
+    // direct children repeat (same tag.class) AND look like content cards: not
+    // script/style/etc., visible, sized, containing a link and real text. This
+    // avoids real-site traps (repeated <script>/nav/wrapper elements). Explicit
+    // `container` is still more reliable.
+    const SKIP = new Set(['SCRIPT','STYLE','SVG','PATH','HEAD','LINK','META','NOSCRIPT','OPTION','BR','HR','TEMPLATE','IFRAME','PICTURE','SOURCE']);
+    const ok = (k) => {
+      if (SKIP.has(k.tagName) || !k.querySelector('a[href]')) return false;
+      const r = k.getBoundingClientRect();
+      if (r.width < 60 || r.height < 60) return false;
+      return (k.innerText || '').replace(/\s+/g, ' ').trim().length >= 30;
+    };
     let bestN = 2;
     document.querySelectorAll('*').forEach(parent => {
       const kids = parent.children; if (kids.length < 3) return;
       const sig = {};
       for (const k of kids) {
+        if (!ok(k)) continue;
         const cls = ((k.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean)[0]) || '';
         const s = k.tagName.toLowerCase() + (cls ? '.' + cls : '');
         (sig[s] = sig[s] || []).push(k);
@@ -465,6 +475,9 @@ _EXTRACT_JS = r"""(() => {
     const huge = items.filter(el => (el.innerText || '').length > 4000).length;
     if (items.length && huge >= Math.max(1, items.length - 1)) {
       return { error: 'auto-detected rows look too broad (each is huge). Pass an explicit `container` CSS selector for the repeating item — do one browser_observe/browser_screenshot first to find it.' };
+    }
+    if (!items.length) {
+      return { error: 'could not auto-detect a repeating content block. Pass an explicit `container` CSS selector (e.g. a card/listing element you saw via browser_observe).' };
     }
   }
   const fields = (FIELDS && Object.keys(FIELDS).length) ? FIELDS : { text: 'text', href: 'a@href' };
