@@ -79,7 +79,7 @@ class AgentSession:
     profileId: str
     profileName: str
     prompt: str
-    status: str                       # starting|queued|running|done|failed|canceled (done/failed/canceled are reactivatable)
+    status: str                       # queued|starting|running|waiting|scheduled|done|failed|canceled
     createdAt: float
     watch: bool = False
     startedAt: float | None = None
@@ -91,6 +91,10 @@ class AgentSession:
     turns: int = 0
     runIds: list[str] = field(default_factory=list)
     pendingSteers: list[str] = field(default_factory=list)
+    # canonical inbox: notifications wake the agent (e.g. a detached workflow it
+    # launched finished). Each: {id, kind, payload, createdAt, delivered}.
+    notifications: list[dict] = field(default_factory=list)
+    scheduledAt: float | None = None  # when status == "scheduled": the future wake time
 
 
 # ------------------------------------------------------------------ normalisation
@@ -179,6 +183,29 @@ def _norm_claude(obj: dict) -> list[dict]:
 
 
 _RUNNING = {"starting", "queued", "running"}  # a turn is in flight (can't reactivate, only queue)
+_AT_REST = {"done", "failed", "canceled", "waiting", "scheduled"}  # reactivatable; waiting/scheduled also auto-resume
+
+# Canonical, TOOL-AGNOSTIC preamble prepended to every agent's system prompt. It
+# defines the agent's shape/role inside Automation Studio without naming specific
+# tools (those are per-agent — the MCP tool list/descriptions tell the agent what
+# it actually has). Composed with runtime facts (the session workspace path).
+STUDIO_PREAMBLE = (
+    "You are an autonomous agent operating INSIDE Automation Studio — a desktop app for building and "
+    "running real browser and data automations. You act through the Studio tools exposed to you; their "
+    "descriptions tell you what each does. Those tools are your primary way to work: they're integrated "
+    "with the app, visible to the user, persistent and safe. You also have your own native abilities (a "
+    "shell, file read/write, web). Prefer the Studio tools for anything about data, workflows, runs or the "
+    "browser; fall back to native abilities only when nothing in Studio fits.\n"
+    "Your session has a private working folder at {ws} (it's your working directory). Keep temporary "
+    "scripts you write+run, downloaded or prepared data, and scratch artifacts THERE by default. You may "
+    "read or write elsewhere on the machine if a task genuinely needs it, but default to your session "
+    "folder.\n"
+    "Running a workflow is DETACHED by default: you get a runId and can keep working, poll its status/logs, "
+    "or simply end your turn. If you end your turn while a workflow YOU launched is still running, you are "
+    "automatically paused and then WOKEN with a notification when it finishes — so you never need to wait "
+    "explicitly or busy-loop. When you have nothing left to do and nothing of yours is running, just end "
+    "your turn."
+)
 
 
 class _Stopped(Exception):
@@ -238,8 +265,12 @@ class AgentManager:
                     s = AgentSession(**{k: d[k] for k in AgentSession.__dataclass_fields__ if k in d})
                     s.controlPort = None      # no browser survives a restart
                     s.pendingSteers = []
-                    if s.status == "idle":
-                        s.status = "done"     # migrate the legacy rest state → done
+                    if s.status in ("idle", "waiting"):
+                        # legacy rest state, or was waiting on a run that didn't survive
+                        # the restart → done (reactivatable; its lock is gone anyway).
+                        s.status = "done"
+                    elif s.status == "scheduled":
+                        pass                  # the Timeline re-fires it at scheduledAt
                     elif s.status not in TERMINAL:
                         # interrupted mid-flight by a restart — resources are gone, but
                         # the native thread persists, so it's still reactivatable.
@@ -438,6 +469,81 @@ class AgentManager:
         for s in self.sessions.values():
             await self._release_browser(s)
 
+    # ------------------------------------------------------------------ context / notifications
+    def _compose_sysprompt(self, s: AgentSession, d: "AgentDef | None") -> str:
+        """The canonical Studio preamble (+ this session's workspace path) prepended
+        to the agent's own role/skills prompt."""
+        ws = str(SESSIONS_DIR / s.id / "workspace")
+        head = STUDIO_PREAMBLE.format(ws=ws)
+        role = (d.systemPrompt if d else "") or ""
+        return f"{head}\n\n{role}".strip() if role else head
+
+    def _run_active(self, rid: str) -> bool:
+        try:
+            from .manager import get_manager, ACTIVE
+            r = get_manager().get(rid)
+            return bool(r and r.get("status") in (ACTIVE | {"queued"}))
+        except Exception:
+            return False
+
+    def _owned_active_runs(self, s: AgentSession) -> list[str]:
+        return [rid for rid in s.runIds if self._run_active(rid)]
+
+    def _pending_notes(self, s: AgentSession) -> list[dict]:
+        return [n for n in s.notifications if not n.get("delivered")]
+
+    def notify(self, sid: str, kind: str, payload: dict) -> None:
+        """Canonical notification entry point: append to the agent's inbox and wake
+        it. Used by the RunManager when a detached workflow the agent launched
+        finishes; extensible to other event kinds later (mid-turn or at-rest)."""
+        s = self.sessions.get(sid)
+        if not s:
+            return
+        note = {"id": uuid.uuid4().hex[:8], "kind": kind, "payload": payload,
+                "createdAt": time.time(), "delivered": False}
+        s.notifications.append(note)
+        summary = self._note_summary(note)
+        self._emit(sid, {"kind": "system", "text": f"🔔 {summary}"})
+        self._save_sessions()
+        self._maybe_wake(s)
+
+    @staticmethod
+    def _note_summary(n: dict) -> str:
+        p = n.get("payload") or {}
+        if n.get("kind") == "workflow_finished":
+            rid, st = p.get("runId"), p.get("status")
+            extra = f" — {p.get('rows')} rows" if p.get("rows") is not None else (f" — {p.get('error')}" if p.get("error") else "")
+            return f"workflow {p.get('workflow') or rid} {st}{extra} (run {rid})"
+        return n.get("kind", "notification")
+
+    def _wake_prompt(self, notes: list[dict]) -> str:
+        lines = ["You were woken because:"]
+        for n in notes:
+            lines.append(f"- {self._note_summary(n)}")
+        lines.append("Check the result (e.g. studio_run_result / studio_run_status / studio_run_logs), then "
+                     "continue what you were doing, start the next step, or end your turn if there's nothing left.")
+        return "\n".join(lines)
+
+    def _maybe_wake(self, s: AgentSession) -> None:
+        """If the agent is at rest (not mid-turn, not user-canceled), start a turn to
+        consume pending notifications."""
+        if s.status in _RUNNING or s.status == "canceled":
+            return  # mid-turn: consumed at turn end; canceled: user stopped it
+        if not self._pending_notes(s):
+            return
+        asyncio.create_task(self._wake(s))
+
+    async def _wake(self, s: AgentSession) -> None:
+        if s.status in _RUNNING or s.status == "canceled":
+            return
+        notes = self._pending_notes(s)
+        if not notes:
+            return
+        for n in notes:
+            n["delivered"] = True
+        self._save_sessions()
+        await self._run_turn(s, self._wake_prompt(notes), resume=True)
+
     # ------------------------------------------------------------------ ownership
     async def _ensure_browser(self, s: AgentSession) -> None:
         """Acquire the agent's browser for a turn. A persistent profile is taken
@@ -500,10 +606,11 @@ class AgentManager:
 
         backend_url = f"http://127.0.0.1:{os.environ.get('AUTOMATION_PORT', '8765')}"
         d = self.defs.get(s.agentId)
-        sysprompt = d.systemPrompt if d else ""
+        sysprompt = self._compose_sysprompt(s, d)
         env_pairs = {
             "AUTOMATION_BACKEND_URL": backend_url,
-            "AGENT_ID": s.agentId,
+            "AGENT_ID": s.agentId,            # agent DEFINITION id
+            "AGENT_SESSION_ID": s.id,         # this SESSION (runs are owned by + notify the session)
             "AGENT_PROFILE_ID": s.profileId,
         }
         if s.controlPort:
@@ -576,22 +683,30 @@ class AgentManager:
             s.threadId = None
             await self._run_turn(s, prompt, resume=False, _retry=True)
             return
+        if s.status == "canceled":
+            await self._release_browser(s)
+            self._save_sessions()
+            return
         # A message queued during this turn → continue immediately, KEEPING the
         # browser (no restart between back-to-back turns).
-        if s.pendingSteers and s.status != "canceled":
+        if s.pendingSteers:
             nxt = s.pendingSteers.pop(0)
             self._save_sessions()
             await self._run_turn(s, nxt, resume=True)
             return
-        # At rest → release the browser/profile lock so other runs/agents can use it.
-        await self._release_browser(s)
-        if s.status == "canceled":
-            self._save_sessions()
+        # A notification arrived during this turn → consume it as the next turn,
+        # KEEPING the browser (same as a steer).
+        if self._pending_notes(s) and not (code != 0 or turn_flags.get("turn_error")):
+            await self._wake(s)
             return
-        # Decide the resting status. The engine binary breaking mid-turn (non-zero
-        # exit, or a top-level turn error) is a FAILURE — marked like a failed run,
-        # with the error surfaced. Otherwise the turn is DONE. Both are reactivatable.
+        # Decide the resting status. Engine crash (non-zero exit / top-level turn
+        # error) → FAILURE. Otherwise: if a workflow this agent launched is still
+        # running, it OWNS the profile lock and must keep its browser (the run is
+        # attached to it) → WAITING, to be woken by the run's completion
+        # notification. Only when nothing of its own is running do we release the
+        # lock and go DONE. All three are reactivatable.
         if code != 0 or turn_flags.get("turn_error"):
+            await self._release_browser(s)
             s.status = "failed"
             tail = "\n".join(turn_flags.get("stderr_tail") or [])
             s.error = (turn_flags.get("turn_error_msg") or _short(tail, 500)
@@ -599,7 +714,12 @@ class AgentManager:
             if not turn_flags.get("turn_error"):  # surface a crash that produced no error event
                 self._emit(s.id, {"kind": "error",
                                   "text": f"the {s.engine} agent crashed mid-turn (exit code {code}). {s.error}"[:600]})
+        elif self._owned_active_runs(s):
+            s.status = "waiting"   # keep the browser/profile lock; woken on completion
+            self._emit(s.id, {"kind": "system",
+                              "text": "⏸ turn ended with a workflow still running — paused; you'll be woken when it finishes"})
         else:
+            await self._release_browser(s)
             s.status = "done"
         s.finishedAt = time.time()
         self._emit(s.id, {"kind": "status", "status": s.status})

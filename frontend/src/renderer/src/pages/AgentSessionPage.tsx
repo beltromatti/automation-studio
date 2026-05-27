@@ -7,6 +7,7 @@ import type { AgentEvent, AgentSession } from "@/lib/types";
 
 const STATUS_COLOR: Record<string, string> = {
   starting: "#3b9eff", queued: "#9aa0a6", running: "#3b9eff",
+  waiting: "#f5a623", scheduled: "#9b8cff",
   done: "#2bd576", failed: "#ff5c5c", canceled: "#6e6e6e",
 };
 const IN_FLIGHT = ["starting", "queued", "running"]; // a turn is running (or waiting for a profile)

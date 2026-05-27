@@ -1,6 +1,7 @@
 import type { RunStatus } from "@/lib/types";
 
 const MAP: Record<RunStatus, { label: string; color: string; dot: string }> = {
+  scheduled: { label: "Scheduled", color: "#9b8cff", dot: "#9b8cff" },
   queued: { label: "Queued", color: "#a1a1a1", dot: "#6e6e6e" },
   starting: { label: "Starting", color: "#3b9eff", dot: "#3b9eff" },
   running: { label: "Running", color: "#3b9eff", dot: "#3b9eff" },

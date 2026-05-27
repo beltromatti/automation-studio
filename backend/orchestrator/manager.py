@@ -728,6 +728,17 @@ class RunManager:
                 await self.shutdown_server(run)  # detach bookkeeping; keep agent's browser
         self._save()
         self.schedule()
+        # Canonical notification: a workflow an agent launched (detached) finished →
+        # tell that agent, which wakes it (a `waiting` agent resumes; a `done` one is
+        # re-activated). The agent then inspects the result and decides what's next.
+        if run.agentId and run.status in TERMINAL:
+            try:
+                from .agents import get_agents
+                get_agents().notify(run.agentId, "workflow_finished", {
+                    "runId": run.id, "workflow": run.workflowId, "status": run.status,
+                    "rows": run.rows, "error": run.error, "datasetId": run.datasetId})
+            except Exception as e:
+                self._log(run.id, f"[backend] agent notify failed: {e}")
 
     # ------------------------------------------------------------------ server helpers
     async def shutdown_server(self, run: Run) -> None:

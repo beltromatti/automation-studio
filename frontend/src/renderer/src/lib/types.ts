@@ -1,4 +1,5 @@
 export type RunStatus =
+  | "scheduled" // queued for a future time (the Timeline releases it when due)
   | "queued"
   | "starting"
   | "running"
@@ -120,7 +121,11 @@ export interface DatasetRows {
 
 // ---- Agents: the AI layer that drives the app and the browser ----------------
 export type AgentEngine = "codex" | "claude";
-export type AgentStatus = "starting" | "queued" | "running" | "done" | "failed" | "canceled";
+export type AgentStatus =
+  | "starting" | "queued" | "running"
+  | "waiting"    // turn ended with a workflow it launched still running — paused, woken on completion
+  | "scheduled"  // ended a turn after scheduling a future wake (re-queues at scheduledAt)
+  | "done" | "failed" | "canceled";
 
 // An agent is engine-agnostic — the engine (codex|claude) is chosen per session at launch.
 export interface AgentDef {

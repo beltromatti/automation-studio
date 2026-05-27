@@ -30,6 +30,9 @@ CONTROL_PORT = os.environ.get("MCP_CONTROL_PORT", "").strip()
 CONTROL = f"http://127.0.0.1:{CONTROL_PORT}" if CONTROL_PORT else ""
 AGENT_PROFILE_ID = os.environ.get("AGENT_PROFILE_ID", "ephemeral")
 AGENT_ID = os.environ.get("AGENT_ID", "")
+# the SESSION that owns this MCP server — runs launched here are owned by it and
+# its completion notification is delivered to it (falls back to AGENT_ID).
+AGENT_SESSION_ID = os.environ.get("AGENT_SESSION_ID", "") or AGENT_ID
 CONTROL_PORT_INT = int(CONTROL_PORT) if CONTROL_PORT.isdigit() else None
 PROTOCOL_FALLBACK = "2024-11-05"
 
@@ -166,7 +169,7 @@ def t_run_workflow(a):
     body = {"workflowId": a["workflowId"], "params": a.get("params", {}),
             "profileId": profile, "watch": a.get("watch", False),
             "datasetId": a.get("datasetId"), "inputDatasetId": a.get("inputDatasetId"),
-            "agentId": AGENT_ID or None}
+            "agentId": AGENT_SESSION_ID or None}
     # When the agent owns a browser and runs on its own profile, the workflow
     # shares that browser (attach) instead of launching a second one.
     if CONTROL_PORT_INT and profile == AGENT_PROFILE_ID:
