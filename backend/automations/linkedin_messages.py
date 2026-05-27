@@ -3,9 +3,11 @@
 Consumes a dataset of LinkedIn profiles (a ``profile_url`` per row — the exact
 shape the *LinkedIn People* / *LinkedIn Connections* workflows output, so the three
 chain directly) and, one profile at a time, human-paced, sends a direct message —
-**but only to people you are actually 1st-degree connected to**. Accepts one message
-or a list of messages to alternate (round-robin across the messages actually sent).
-Output = the input list with a ``status`` (and ``detail``) column added.
+**but only to people you are actually 1st-degree connected to**. The message can be
+set three ways, in priority order: a per-row ``message`` column in the input dataset
+(personalized per recipient — overrides everything), else a list of ``messages`` to
+alternate (round-robin across the fallback messages actually sent), else a single
+``message`` param. Output = the input list with a ``status`` (and ``detail``) column.
 
 Built to be resilient to everything a logged-in LinkedIn session does, learned by
 driving real profiles by hand (the same way [[linkedin_connections]] was):
@@ -95,6 +97,16 @@ def _messages(params: dict) -> list[str]:
     if not msgs and params.get("message"):
         msgs = [str(params["message"])]
     return [re.sub(r"\s+", " ", m).strip() for m in msgs if m and m.strip()]
+
+
+def _row_message(row: dict) -> str:
+    """A per-recipient message carried on the input row (a ``message`` column in the
+    dataset). When present it OVERRIDES both the single ``message`` param and the
+    ``messages``-to-alternate param, so each person can get a bespoke message."""
+    for k in ("message", "messaggio", "msg"):
+        if row.get(k):
+            return re.sub(r"\s+", " ", str(row[k])).strip()
+    return ""
 
 
 # ---- main-frame page facts (owner, degree, interstitials) --------------------
@@ -393,16 +405,22 @@ async def process_profile(sess, url: str, message: str) -> tuple[str, str, str]:
 
 # ---- run ---------------------------------------------------------------------
 async def run(params, sess, inputs):
-    messages = _messages(params)
-    if not messages:
-        userkit.error("no message — provide a 'message' (or a 'messages' list to alternate)")
+    # message resolution per row: a ``message`` column on the row (personalized) wins;
+    # otherwise the ``message``/``messages`` params (a single message, or several to
+    # alternate round-robin across the FALLBACK messages actually sent).
+    fallback = _messages(params)
+    n_personalized = sum(1 for r in inputs if _row_message(r))
+    if not fallback and not n_personalized:
+        userkit.error("no message — provide a 'message'/'messages' param, or a 'message' column in the input")
         return [{"profile_url": _profile_url(r) or str(r.get("profile_url") or ""),
                  "name": str(r.get("name") or ""), "status": "error", "detail": "no message configured"}
                 for r in inputs]
     max_messages = int(params.get("maxMessages") or 0)  # 0 = no cap
-    out, total, sent, stop = [], len(inputs), 0, False
-    userkit.log(f"[messages] {total} rows · {len(messages)} message variant(s)"
-                f"{' · alternating' if len(messages) > 1 else ''}"
+    out, total, sent, fb_sent, stop = [], len(inputs), 0, 0, False
+    userkit.log(f"[messages] {total} rows"
+                f"{f' · {n_personalized} personalized (per-row override)' if n_personalized else ''}"
+                f"{f' · {len(fallback)} fallback variant(s)' if fallback else ''}"
+                f"{' · alternating' if len(fallback) > 1 else ''}"
                 f"{f' · cap {max_messages}' if max_messages else ''}")
     for i, row in enumerate(inputs, 1):
         url = _profile_url(row)
@@ -415,7 +433,16 @@ async def run(params, sess, inputs):
         if stop:
             out.append({"profile_url": url, "name": name_in, "status": "skipped", "detail": "stopped (cap reached)"})
             continue
-        message = messages[sent % len(messages)]  # alternate across messages actually sent
+        row_msg = _row_message(row)
+        if row_msg:
+            message = row_msg  # per-row personalized message overrides the params
+        elif fallback:
+            message = fallback[fb_sent % len(fallback)]  # alternate across fallback sends
+        else:
+            out.append({"profile_url": url, "name": name_in, "status": "no_message",
+                        "detail": "no message for this row (no per-row message and no param)"})
+            userkit.progress(i, total, message=f"{i}/{total} (no message)")
+            continue
         try:
             owner, status, detail = await process_profile(sess, url, message)
         except Exception as e:
@@ -424,6 +451,8 @@ async def run(params, sess, inputs):
         out.append({"profile_url": url, "name": owner or name_in, "status": status, "detail": detail})
         if status == "sent":
             sent += 1
+            if not row_msg:  # only fallback sends advance the alternation cursor
+                fb_sent += 1
         userkit.progress(i, total, message=f"{i}/{total} {owner or url} → {status}", url=url)
         if max_messages and sent >= max_messages:
             userkit.log(f"[messages] reached maxMessages={max_messages}; stopping")
