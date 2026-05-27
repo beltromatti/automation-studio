@@ -140,7 +140,8 @@ def t_dataset_rows(a):
 
 def t_dataset_create(a):
     return _api("POST", "/api/datasets", {"name": a["name"], "columns": a.get("columns", []),
-                                          "dedupKeys": a.get("dedupKeys"), "source": {"kind": "manual"}})
+                                          "rows": a.get("rows"), "dedupKeys": a.get("dedupKeys"),
+                                          "source": {"kind": "manual"}})
 
 
 def t_dataset_append(a):
@@ -420,31 +421,51 @@ def _outline(d: dict, max_chars: int = 14_000, dedup: bool = False) -> str:
 
 
 _EXTRACT_JS = r"""(() => {
-  const CONTAINER = __CONTAINER__, FIELDS = __FIELDS__, LIMIT = __LIMIT__;
-  const txt = (el) => el ? (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : null;
+  const CONTAINER = __CONTAINER__, FIELDS = __FIELDS__, LIMIT = __LIMIT__, CAP = 2000;
+  const clip = (s) => (s && s.length > CAP) ? s.slice(0, CAP) + '…' : s;
+  const txt = (el) => el ? clip((el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim()) : null;
+  // A field spec is one of: 'text' (or '') => the row's own text; 'css' => that
+  // descendant's text; 'css@attr' or '@attr' => an attribute; 'regex:PATTERN' =>
+  // first capture group (or whole match) of PATTERN against the row's text. CSS is
+  // scoped to the row (use ':scope > .x' for direct children).
   const one = (el, spec) => {
     if (!spec || spec === 'text') return txt(el);
-    let sel = spec, attr = null; const at = spec.indexOf('@');
-    if (at >= 0) { sel = spec.slice(0, at); attr = spec.slice(at + 1); }
-    const t = sel ? el.querySelector(sel) : el;
+    if (spec.indexOf('regex:') === 0) {
+      const body = (el.innerText || el.textContent || '').replace(/\s+/g, ' ');
+      try { const m = body.match(new RegExp(spec.slice(6))); return m ? (m[1] !== undefined ? m[1] : m[0]) : null; }
+      catch (e) { return null; }
+    }
+    let sel = spec, attr = null; const at = spec.lastIndexOf('@');
+    if (at > 0) { sel = spec.slice(0, at); attr = spec.slice(at + 1); }
+    else if (at === 0) { sel = ''; attr = spec.slice(1); }
+    let t; try { t = sel ? el.querySelector(sel) : el; } catch (e) { return null; }
     if (!t) return null;
-    if (attr) { const v = t.getAttribute(attr); return v == null ? null : v; }
+    if (attr) { const v = t.getAttribute(attr); return v == null ? null : clip(v); }
     return txt(t);
   };
   let items = [], used = CONTAINER;
   if (CONTAINER) {
-    items = Array.from(document.querySelectorAll(CONTAINER));
+    try { items = Array.from(document.querySelectorAll(CONTAINER)); }
+    catch (e) { return { error: 'invalid container selector: ' + CONTAINER }; }
   } else {
-    const sig = new Map();
-    document.querySelectorAll('*').forEach(el => {
-      if (!el.querySelector('a[href]')) return;
-      if ((el.innerText || '').replace(/\s+/g, ' ').trim().length < 40) return;
-      const cls = (el.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean).slice(0, 3).join('.');
-      const k = el.tagName.toLowerCase() + (cls ? '.' + cls : '');
-      (sig.get(k) || sig.set(k, []).get(k)).push(el);
-    });
+    // auto: the SMALLEST repeating sibling group — the parent whose direct children
+    // repeat the most with the same tag.class signature (that's the listing grid;
+    // its children are the rows). Avoids grabbing a giant page wrapper.
     let bestN = 2;
-    for (const [k, els] of sig) if (els.length > bestN) { bestN = els.length; items = els; used = k; }
+    document.querySelectorAll('*').forEach(parent => {
+      const kids = parent.children; if (kids.length < 3) return;
+      const sig = {};
+      for (const k of kids) {
+        const cls = ((k.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean)[0]) || '';
+        const s = k.tagName.toLowerCase() + (cls ? '.' + cls : '');
+        (sig[s] = sig[s] || []).push(k);
+      }
+      for (const s in sig) if (sig[s].length > bestN) { bestN = sig[s].length; items = sig[s]; used = s; }
+    });
+    const huge = items.filter(el => (el.innerText || '').length > 4000).length;
+    if (items.length && huge >= Math.max(1, items.length - 1)) {
+      return { error: 'auto-detected rows look too broad (each is huge). Pass an explicit `container` CSS selector for the repeating item — do one browser_observe/browser_screenshot first to find it.' };
+    }
   }
   const fields = (FIELDS && Object.keys(FIELDS).length) ? FIELDS : { text: 'text', href: 'a@href' };
   const rows = items.slice(0, LIMIT).map(el => {
@@ -623,9 +644,9 @@ STUDIO_TOOLS = [
     ("studio_dataset_rows", "Read rows from a dataset (paginated, optional text search).",
      {"type": "object", "properties": {"datasetId": {"type": "string"}, "limit": {"type": "integer"},
                                        "offset": {"type": "integer"}, "search": {"type": "string"}}, "required": ["datasetId"]}, t_dataset_rows),
-    ("studio_dataset_create", "Create a new dataset. columns: [{name,type:text|number|boolean}]. dedupKeys: column display names.",
+    ("studio_dataset_create", "Create a new dataset — optionally populated in the same call. columns: [{name,type}] where type is text|number|boolean (SQL-ish aliases like integer/real/float map to number, so numeric columns sort/aggregate correctly and string values are coerced to numbers). rows: [{colName: value}] to insert immediately. dedupKeys: column display names.",
      {"type": "object", "properties": {"name": {"type": "string"}, "columns": {"type": "array"},
-                                       "dedupKeys": {"type": "array"}}, "required": ["name"]}, t_dataset_create),
+                                       "rows": {"type": "array"}, "dedupKeys": {"type": "array"}}, "required": ["name"]}, t_dataset_create),
     ("studio_dataset_append", "Append rows (list of objects keyed by column name) to a dataset; dedups by the dataset's keys and extends the schema for new columns.",
      {"type": "object", "properties": {"datasetId": {"type": "string"}, "rows": {"type": "array"},
                                        "dedup": {"type": "boolean"}, "extend": {"type": "boolean"}}, "required": ["datasetId", "rows"]}, t_dataset_append),
@@ -709,7 +730,7 @@ BROWSER_TOOLS = [
      {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}, t_browser_goto),
     ("browser_observe", "Observe the current page: an indexed snapshot of interactive elements + text, descending into shadow DOM and same-origin iframes. Each element shows its [index] (use with browser_click/browser_type), with '@shadow'/'@iframe' marking elements only reachable via observe+click (NOT browser_eval) and '(offscreen)' marking out-of-viewport ones. Pass format='full' to also get every element's xpath, center [x,y], frame and inViewport — use that (or browser_inspect) to tell look-alike controls apart (e.g. an in-card button under <main> vs a duplicate sticky-header one). Pass dedup=true to collapse runs of identical look-alike elements (e.g. a card's repeated photo links) into one line with a count — great for cutting noise on listing/grid pages (then use browser_extract for the structured data). maxNodes caps the snapshot (default 1200).",
      {"type": "object", "properties": {"format": {"type": "string", "enum": ["outline", "full"]}, "dedup": {"type": "boolean"}, "maxNodes": {"type": "integer"}}}, t_browser_observe),
-    ("browser_extract", "Bulk-extract structured rows from REPEATED page content in one call (light DOM, deterministic — no parsing round-trips). `container` is a CSS selector for the repeating item (e.g. a listing card); omit it to auto-detect the dominant repeated block (explicit is more reliable). `fields` maps output keys to per-item specs: 'text' or '' = the element's text; 'css-selector' = that child's text; 'css-selector@attr' or '@attr' = an attribute (e.g. {title:'h3', price:'.price', url:'a@href', img:'img@src'}). Returns {container, count, rows}. Use this instead of observe+manual-parse whenever you're scraping many similar items; for precise single controls / shadow-DOM, use browser_observe + browser_inspect.",
+    ("browser_extract", "Bulk-extract structured rows from REPEATED page content in one call (light DOM, deterministic — no parsing round-trips). `container` = a CSS selector for the repeating item (e.g. a listing card); omit it to auto-detect the dominant repeated sibling group (explicit is more reliable — if auto looks too broad it returns an error asking for one). `fields` maps each output key to a per-item spec, where the CSS is SCOPED to the row (use ':scope > .x' for a direct child): 'text' or '' = the row's own text; 'css' = that descendant's text; 'css@attr' or '@attr' = an attribute; 'regex:PATTERN' = the first capture group (or whole match) of PATTERN against the row's text — great for pulling a price/number out of a noisy card (e.g. {title:'h3', price:'regex:€\\\\s*([\\\\d.,]+)', rating:\"[aria-label*='rating']@aria-label\", url:'a@href'}). Field values are truncated to ~2000 chars. Returns {container, count, rows}. For precise single controls / shadow-DOM use browser_observe + browser_inspect.",
      {"type": "object", "properties": {"container": {"type": "string"}, "fields": {"type": "object"}, "limit": {"type": "integer"}}}, t_browser_extract),
     ("browser_inspect", "Zoom into elements whose accessible name contains `match` (and/or a `tag`, and/or `frame`=main|shadow|iframe) and return full metadata for each: index, tag, name, attrs, inViewport, center [x,y], xpath, frame. The way to disambiguate duplicate/look-alike controls and pick the right [index] before clicking (e.g. choose the Connect whose xpath contains '/main', not the sticky-header twin).",
      {"type": "object", "properties": {"match": {"type": "string"}, "tag": {"type": "string"},

@@ -37,6 +37,15 @@ from humanbrowser.config import data_dir
 
 DB_PATH = data_dir() / "studio.sqlite"
 LOGICAL_TYPES = {"text", "number", "boolean"}
+# agents/users naturally write SQL-ish types — map them to our logical types so a
+# column declared `real`/`integer` becomes `number` (values get numeric coercion,
+# so ORDER BY / MIN / MAX work) instead of silently falling back to text.
+_TYPE_ALIASES = {
+    "int": "number", "integer": "number", "bigint": "number", "smallint": "number",
+    "real": "number", "float": "number", "double": "number", "decimal": "number",
+    "numeric": "number", "num": "number", "money": "number", "currency": "number",
+    "bool": "boolean", "str": "text", "string": "text", "varchar": "text", "char": "text",
+}
 _AFFINITY = {"text": "TEXT", "number": "NUMERIC", "boolean": "INTEGER"}
 _RESERVED = {"_rid", "_added_at", "rowid", "oid"}
 
@@ -144,6 +153,7 @@ def _sanitize(display: str, taken: set[str]) -> str:
 
 def _norm_type(t: str | None) -> str:
     t = (t or "text").strip().lower()
+    t = _TYPE_ALIASES.get(t, t)
     return t if t in LOGICAL_TYPES else "text"
 
 
