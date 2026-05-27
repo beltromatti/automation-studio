@@ -119,6 +119,16 @@ def create_app() -> FastAPI:
         await get_manager().cancel(rid)
         return {"ok": True}
 
+    @app.post("/api/runs/{rid}/claim")
+    async def claim_run(rid: str, body: dict = Body(...)):
+        """An agent session adopts this run's completion (gets notified/woken when it
+        finishes). Refused if another agent already owns it."""
+        from .agents import get_agents
+        sid = body.get("agentSessionId") or ""
+        if not sid:
+            return JSONResponse({"error": "agentSessionId required"}, status_code=400)
+        return get_agents().claim_run(sid, rid)
+
     @app.post("/api/runs/{rid}/control")
     async def control_run(rid: str, body: dict = Body(...)):
         res = await get_manager().control(rid, body.get("action", ""))

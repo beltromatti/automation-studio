@@ -185,6 +185,7 @@ def _norm_claude(obj: dict) -> list[dict]:
 
 _RUNNING = {"starting", "queued", "running"}  # a turn is in flight (can't reactivate, only queue)
 _AT_REST = {"done", "failed", "canceled", "waiting", "scheduled"}  # reactivatable; waiting/scheduled also auto-resume
+BROWSER_ACQUIRE_WAIT = 4.0  # seconds to wait for a busy profile before proceeding browserless
 
 # Canonical, TOOL-AGNOSTIC preamble prepended to every agent's system prompt. It
 # defines the agent's shape/role inside Automation Studio without naming specific
@@ -481,13 +482,15 @@ class AgentManager:
             await self._release_browser(s)
 
     # ------------------------------------------------------------------ context / notifications
-    def _compose_sysprompt(self, s: AgentSession, d: "AgentDef | None") -> str:
+    def _compose_sysprompt(self, s: AgentSession, d: "AgentDef | None", note: str | None = None) -> str:
         """The canonical Studio preamble (+ this session's workspace path) prepended
-        to the agent's own role/skills prompt."""
+        to the agent's own role/skills prompt, plus an optional runtime note (e.g.
+        the browser is unavailable this turn because the profile is busy)."""
         ws = str(SESSIONS_DIR / s.id / "workspace")
         head = STUDIO_PREAMBLE.format(ws=ws)
         role = (d.systemPrompt if d else "") or ""
-        return f"{head}\n\n{role}".strip() if role else head
+        parts = [head] + ([role] if role else []) + ([note] if note else [])
+        return "\n\n".join(parts)
 
     def _run_active(self, rid: str) -> bool:
         try:
@@ -601,35 +604,94 @@ class AgentManager:
                 asyncio.create_task(self._run_turn(s, prompt, resume=bool(s.threadId)))
 
     # ------------------------------------------------------------------ ownership
-    async def _ensure_browser(self, s: AgentSession) -> None:
-        """Acquire the agent's browser for a turn. A persistent profile is taken
-        through the RunManager's single per-profile gate, QUEUEING (not failing)
-        until it's free of any run / manual session / other agent. Held only for
-        the duration of the turn; released at rest."""
+    def _profile_blocker(self, s: AgentSession) -> dict | None:
+        """The foreign run holding this agent's profile right now (active,
+        non-attached, not this session's), if any — for guidance when the browser
+        can't be acquired."""
+        from .manager import get_manager, ACTIVE
+        for r in get_manager().runs.values():
+            if (r.profileId == s.profileId and r.status in ACTIVE and not r.attachPort
+                    and r.agentId != s.id):
+                return r.__dict__ if hasattr(r, "__dict__") else None
+        return None
+
+    def _busy_note(self, s: AgentSession) -> str:
+        b = self._profile_blocker(s)
+        if b:
+            rid = b.get("id")
+            return (f"NOTE: your profile “{s.profileName}” is busy — workflow run {rid} "
+                    f"({b.get('workflowName')}) is active on it, so the browser and launching workflows on this "
+                    f"profile are NOT available this turn. You can: follow it with studio_run_status / "
+                    f"studio_run_logs; call studio_claim_run('{rid}') to be woken when it finishes; "
+                    f"studio_schedule_wake to come back later; or do non-browser work (data, or a workflow on "
+                    f"another profile). If browser work is all you need, claim or schedule, then end your turn — "
+                    f"you'll be re-activated WITH the browser once the profile is free.")
+        return (f"NOTE: your profile “{s.profileName}” is in use (a login session or another agent), so the "
+                f"browser isn't available this turn. Do non-browser work, or studio_schedule_wake to retry later.")
+
+    async def _ensure_browser(self, s: AgentSession) -> str | None:
+        """Try to acquire the agent's browser for a turn via the RunManager's single
+        per-profile gate. Returns None when acquired (or not a browser agent). If the
+        profile is held by something else, it waits briefly (to absorb transient
+        contention) then PROCEEDS BROWSERLESS, returning a guidance note — the turn
+        still runs (data/scheduling/thinking), the agent can poll/claim/schedule, and
+        gets the browser on a later turn once the profile frees. Held only for the
+        turn; released at rest."""
         if "browser" not in s.scopes or s.controlPort:
-            return
+            return None
         mgr = get_manager()
         waited = False
+        deadline = time.time() + BROWSER_ACQUIRE_WAIT
         while not mgr.claim_profile(s.profileId):
             if s.status == "canceled":         # stopped while queued
                 raise _Stopped()
+            if time.time() >= deadline:
+                note = self._busy_note(s)      # give up the browser this turn, guide instead
+                self._emit(s.id, {"kind": "system", "text": "🔒 " + note})
+                return note
             if not waited:
                 waited = True
-                s.status = "queued"
-                self._emit(s.id, {"kind": "status", "status": "queued"})
                 self._emit(s.id, {"kind": "system", "text": f"⏳ waiting for profile “{s.profileName}” to be free…"})
                 self._save_sessions()
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
         try:
             res = await mgr.open_agent_browser(s.id, s.profileId, headed=s.watch)
         finally:
             mgr.unclaim_profile(s.profileId)
         if not res.get("ok"):
-            raise RuntimeError(res.get("error", "could not open the browser for this agent"))
+            note = f"NOTE: the browser couldn't be opened ({res.get('error')}); proceeding without it this turn."
+            self._emit(s.id, {"kind": "system", "text": "🔒 " + note})
+            return note
         s.controlPort = res.get("port")
         if s.status == "canceled":             # stopped during acquire → undo
             await self._release_browser(s)
             raise _Stopped()
+        return None
+
+    def claim_run(self, sid: str, rid: str) -> dict:
+        """Adopt a run's completion: this session becomes its owner (so it's notified
+        + woken when the run finishes) and treats it as one of its own active runs
+        (resting as `waiting` until it completes). Refused if another agent already
+        owns it. Idempotent for a run you already own."""
+        s = self.sessions.get(sid)
+        if not s:
+            return {"ok": False, "error": "no such session"}
+        from .manager import get_manager, ACTIVE, TERMINAL
+        mgr = get_manager()
+        run = mgr.runs.get(rid)
+        if not run:
+            return {"ok": False, "error": f"no run {rid}"}
+        if run.agentId and run.agentId != sid:
+            return {"ok": False, "error": f"run {rid} is already owned by another agent"}
+        if run.status in TERMINAL:
+            return {"ok": True, "status": run.status, "note": "run already finished"}
+        run.agentId = sid
+        mgr._save()
+        if rid not in s.runIds:
+            s.runIds.append(rid)
+        self._emit(sid, {"kind": "system", "text": f"🪝 claimed run {rid} — you'll be woken when it finishes"})
+        self._save_sessions()
+        return {"ok": True, "status": run.status}
 
     async def _release_browser(self, s: AgentSession) -> None:
         if s.controlPort or s.id in get_manager().agent_browsers:
@@ -647,7 +709,7 @@ class AgentManager:
         self._emit(s.id, {"kind": "system", "text": ("↪ " + prompt) if resume else prompt, "role": "user"})
         self._save_sessions()
         try:
-            await self._ensure_browser(s)   # may queue for a busy profile
+            browser_note = await self._ensure_browser(s)  # None, or a guidance note if browserless
         except _Stopped:
             return  # stopped while queued; status is already "canceled"
         except Exception as e:
@@ -662,7 +724,7 @@ class AgentManager:
 
         backend_url = f"http://127.0.0.1:{os.environ.get('AUTOMATION_PORT', '8765')}"
         d = self.defs.get(s.agentId)
-        sysprompt = self._compose_sysprompt(s, d)
+        sysprompt = self._compose_sysprompt(s, d, browser_note)
         env_pairs = {
             "AUTOMATION_BACKEND_URL": backend_url,
             "AGENT_ID": s.agentId,            # agent DEFINITION id

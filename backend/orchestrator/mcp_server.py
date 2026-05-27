@@ -247,6 +247,10 @@ def t_cancel_run(a):
     return _api("POST", f"/api/runs/{a['runId']}/cancel")
 
 
+def t_claim_run(a):
+    return _api("POST", f"/api/runs/{a['runId']}/claim", {"agentSessionId": AGENT_SESSION_ID})
+
+
 def t_run_result(a):
     return _api("GET", f"/api/runs/{a['runId']}/result")
 
@@ -549,8 +553,10 @@ STUDIO_TOOLS = [
      {"type": "object", "properties": {"limit": {"type": "integer"}}}, t_list_runs),
     ("studio_run_logs", "Read a run's log lines (the workflow's progress/log/error output) — use to diagnose a failed or stuck run.",
      {"type": "object", "properties": {"runId": {"type": "string"}, "tail": {"type": "integer"}}, "required": ["runId"]}, t_run_logs),
-    ("studio_cancel_run", "Cancel a running/queued run.",
+    ("studio_cancel_run", "Cancel a running/queued/scheduled run.",
      {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]}, t_cancel_run),
+    ("studio_claim_run", "Adopt a run's completion so YOU are notified/woken when it finishes (treats it like one of your own runs — you'll rest as `waiting` until it's done). Use this when a workflow you didn't launch is holding your profile/browser: claim it, then end your turn and you'll be re-activated when it completes. Refused if another agent already owns it.",
+     {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]}, t_claim_run),
     ("studio_run_result", "Read a finished run's result rows directly (the output CSV parsed to rows) without going through a dataset.",
      {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]}, t_run_result),
     ("studio_run_to_dataset", "Append a finished run's result into a dataset (new if no datasetId, else existing). The canonical way to capture a run's output into the persistent data layer.",
