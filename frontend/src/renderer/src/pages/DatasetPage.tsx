@@ -24,6 +24,8 @@ export default function DatasetPage() {
   const [error, setError] = useState("");
   const [showSql, setShowSql] = useState(false);
   const [showProject, setShowProject] = useState(false);
+  const [colOpen, setColOpen] = useState(false);          // Add-column modal (Electron has no window.prompt)
+  const [renaming, setRenaming] = useState<string | null>(null);  // column being renamed
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
 
@@ -64,15 +66,15 @@ export default function DatasetPage() {
     else { setSort(c); setDir("asc"); }
   };
 
-  const addColumn = async () => {
-    const name = prompt("New column name:");
-    if (!name) return;
-    const type = (prompt("Type — text | number | boolean", "text") || "text").toLowerCase() as ColumnType;
-    await jpost(`/api/datasets/${id}/add-column`, { display: name, type }).catch((e) => setError(String(e.message)));
+  const doAddColumn = async (name: string, type: ColumnType) => {
+    setColOpen(false);
+    if (!name.trim()) return;
+    await jpost(`/api/datasets/${id}/add-column`, { display: name.trim(), type }).catch((e) => setError(String(e.message)));
     reload();
   };
 
   const addRow = async () => {
+    if (cols.length === 0) { setError("Add a column first — a row needs at least one column to be visible."); return; }
     await jpost(`/api/datasets/${id}/rows`, { values: {} }).catch((e) => setError(String(e.message)));
     reload();
   };
@@ -90,11 +92,11 @@ export default function DatasetPage() {
     setMenuCol(null); loadMeta();
   };
 
-  const renameColumn = async (from: string) => {
-    const to = prompt("Rename column:", from);
-    setMenuCol(null);
-    if (!to || to === from) return;
-    await jpost(`/api/datasets/${id}/rename-column`, { from, to }).catch((e) => setError(String(e.message)));
+  const doRenameColumn = async (to: string) => {
+    const fromCol = renaming;
+    setRenaming(null);
+    if (!fromCol || !to.trim() || to.trim() === fromCol) return;
+    await jpost(`/api/datasets/${id}/rename-column`, { from: fromCol, to: to.trim() }).catch((e) => setError(String(e.message)));
     reload();
   };
 
@@ -149,7 +151,7 @@ export default function DatasetPage() {
         }
         actions={
           <>
-            <button className="btn btn-secondary btn-sm" onClick={addColumn}><Icon name="columns" size={13} /> Column</button>
+            <button className="btn btn-secondary btn-sm" onClick={() => setColOpen(true)}><Icon name="columns" size={13} /> Column</button>
             <button className="btn btn-secondary btn-sm" onClick={addRow}><Icon name="plus" size={13} /> Row</button>
             <button className="btn btn-secondary btn-sm" onClick={dedup} title="Remove duplicate rows by the dedup key(s)"><Icon name="filter" size={13} /> Dedup</button>
             <button className="btn btn-secondary btn-sm" onClick={() => setShowProject(true)} title="Create a new dataset from selected columns (prep an input)"><Icon name="arrowRight" size={13} /> Project</button>
@@ -203,7 +205,7 @@ export default function DatasetPage() {
                   {cols.map((c) => (
                     <ColumnHeader key={c.name} col={c} sort={sort} dir={dir} isKey={dedupKeys.has(c.display)}
                                   open={menuCol === c.display} onToggleMenu={() => setMenuCol((m) => (m === c.display ? null : c.display))}
-                                  onSort={() => toggleSort(c.display)} onRename={() => renameColumn(c.display)}
+                                  onSort={() => toggleSort(c.display)} onRename={() => { setMenuCol(null); setRenaming(c.display); }}
                                   onDrop={() => dropColumn(c.display)} onToggleKey={() => toggleDedupKey(c.display)} />
                   ))}
                 </tr>
@@ -243,6 +245,9 @@ export default function DatasetPage() {
         )}
       </div>
 
+      {colOpen && <AddColumnModal onClose={() => setColOpen(false)} onAdd={doAddColumn} />}
+      {renaming && <PromptModal title="Rename column" label="New column name" initial={renaming}
+                                onClose={() => setRenaming(null)} onSubmit={doRenameColumn} submitLabel="Rename" />}
       {showSql && <SqlModal table={ds.table} onClose={() => setShowSql(false)}
                             onSaved={(nid) => navigate(`/data/${nid}`)} onChanged={reload} />}
       {showProject && <ProjectModal dataset={ds} onClose={() => setShowProject(false)} onDone={(nid) => navigate(`/data/${nid}`)} />}
@@ -287,6 +292,8 @@ function SqlModal({ table, onClose, onSaved, onChanged }:
   const [res, setRes] = useState<{ columns: string[]; rows: Record<string, unknown>[]; truncated?: boolean } | null>(null);
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveName, setSaveName] = useState("");
   const isRead = /^\s*(select|with)\b/i.test(sql);
   const run = async () => {
     setError(""); setRes(null); setNote("");
@@ -303,7 +310,7 @@ function SqlModal({ table, onClose, onSaved, onChanged }:
   };
   const saveAsDataset = async () => {
     setError("");
-    const name = prompt("New dataset name for this query's result:");
+    const name = saveName.trim();
     if (!name) return;
     try {
       const r = await jpost<{ id?: string; error?: string }>("/api/datasets/query-to-dataset", { sql, name });
@@ -323,10 +330,19 @@ function SqlModal({ table, onClose, onSaved, onChanged }:
         <button className="btn btn-primary btn-sm" onClick={run}>
           <Icon name="play" size={13} /> {isRead ? "Run" : "Run (writes data)"}
         </button>
-        <button className="btn btn-sm" onClick={saveAsDataset} disabled={!isRead} title={isRead ? "" : "Only SELECT/WITH can be saved as a dataset"}>
+        <button className="btn btn-sm" onClick={() => { setSaving(true); setError(""); }} disabled={!isRead} title={isRead ? "" : "Only SELECT/WITH can be saved as a dataset"}>
           <Icon name="database" size={13} /> Save as dataset…
         </button>
       </div>
+      {saving && (
+        <div className="flex gap-2 mt-2 items-center">
+          <input autoFocus className="input" style={{ height: 32, maxWidth: 280 }} placeholder="New dataset name"
+                 value={saveName} onChange={(e) => setSaveName(e.target.value)}
+                 onKeyDown={(e) => { if (e.key === "Enter" && saveName.trim()) saveAsDataset(); if (e.key === "Escape") setSaving(false); }} />
+          <button className="btn btn-primary btn-sm" onClick={saveAsDataset} disabled={!saveName.trim()}>Create</button>
+          <button className="btn btn-sm" onClick={() => setSaving(false)}>Cancel</button>
+        </div>
+      )}
       {note && <div className="text-[12px] text-success mt-3">{note}</div>}
       {error && <div className="text-[12px] text-danger mt-3">{error}</div>}
       {res && (
@@ -389,6 +405,43 @@ function ProjectModal({ dataset, onClose, onDone }: { dataset: Dataset; onClose:
       </select>
       {error && <div className="text-[12px] text-danger mb-2">{error}</div>}
       <button className="btn btn-primary btn-sm" onClick={go}><Icon name="arrowRight" size={13} /> Create projection</button>
+    </Modal>
+  );
+}
+
+function AddColumnModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name: string, type: ColumnType) => void }) {
+  const [name, setName] = useState("");
+  const [type, setType] = useState<ColumnType>("text");
+  const submit = () => { if (name.trim()) onAdd(name, type); };
+  return (
+    <Modal title="Add column" onClose={onClose}>
+      <label className="label">Column name</label>
+      <input autoFocus className="input mt-1 mb-3" value={name} placeholder="e.g. profile_url"
+             onChange={(e) => setName(e.target.value)}
+             onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onClose(); }} />
+      <label className="label">Type</label>
+      <select className="input appearance-none mt-1 mb-4" value={type} onChange={(e) => setType(e.target.value as ColumnType)}>
+        <option value="text">text</option>
+        <option value="number">number</option>
+        <option value="boolean">boolean</option>
+      </select>
+      <button className="btn btn-primary btn-sm" disabled={!name.trim()} onClick={submit}><Icon name="plus" size={13} /> Add column</button>
+    </Modal>
+  );
+}
+
+function PromptModal({ title, label, initial, placeholder, submitLabel, onClose, onSubmit }:
+                     { title: string; label: string; initial?: string; placeholder?: string; submitLabel?: string;
+                       onClose: () => void; onSubmit: (value: string) => void }) {
+  const [v, setV] = useState(initial ?? "");
+  const submit = () => { if (v.trim()) onSubmit(v); };
+  return (
+    <Modal title={title} onClose={onClose}>
+      <label className="label">{label}</label>
+      <input autoFocus className="input mt-1 mb-4" value={v} placeholder={placeholder}
+             onChange={(e) => setV(e.target.value)}
+             onKeyDown={(e) => { if (e.key === "Enter") submit(); if (e.key === "Escape") onClose(); }} />
+      <button className="btn btn-primary btn-sm" disabled={!v.trim()} onClick={submit}>{submitLabel || "OK"}</button>
     </Modal>
   );
 }
