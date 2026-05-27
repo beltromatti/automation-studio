@@ -194,6 +194,17 @@ def create_app() -> FastAPI:
     async def datasets_query(body: dict = Body(...)):
         return datastore.query(body.get("sql", ""), int(body.get("maxRows", 5000)))
 
+    @app.post("/api/datasets/query-to-dataset")
+    async def datasets_query_to_dataset(body: dict = Body(...)):
+        """Materialise a read-only SELECT/WITH as a new dataset."""
+        return datastore.query_to_dataset(body.get("sql", ""), body.get("name", "Query result"),
+                                          body.get("dedupKeys"), int(body.get("maxRows", 50000)))
+
+    @app.post("/api/datasets/exec")
+    async def datasets_exec(body: dict = Body(...)):
+        """Run a single INSERT/UPDATE/DELETE against the dataset tables (regexp_* available)."""
+        return datastore.exec_sql(body.get("sql", ""))
+
     @app.get("/api/datasets/schema")
     async def datasets_schema():
         return {"schema": datastore.schema_summary()}

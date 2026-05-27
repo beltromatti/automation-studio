@@ -243,7 +243,8 @@ export default function DatasetPage() {
         )}
       </div>
 
-      {showSql && <SqlModal table={ds.table} onClose={() => setShowSql(false)} />}
+      {showSql && <SqlModal table={ds.table} onClose={() => setShowSql(false)}
+                            onSaved={(nid) => navigate(`/data/${nid}`)} onChanged={reload} />}
       {showProject && <ProjectModal dataset={ds} onClose={() => setShowProject(false)} onDone={(nid) => navigate(`/data/${nid}`)} />}
     </>
   );
@@ -280,24 +281,53 @@ function ColumnHeader({ col, sort, dir, isKey, open, onToggleMenu, onSort, onRen
   );
 }
 
-function SqlModal({ table, onClose }: { table: string; onClose: () => void }) {
+function SqlModal({ table, onClose, onSaved, onChanged }:
+                  { table: string; onClose: () => void; onSaved: (id: string) => void; onChanged: () => void }) {
   const [sql, setSql] = useState(`SELECT * FROM "${table}" LIMIT 50`);
   const [res, setRes] = useState<{ columns: string[]; rows: Record<string, unknown>[]; truncated?: boolean } | null>(null);
+  const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const isRead = /^\s*(select|with)\b/i.test(sql);
   const run = async () => {
-    setError(""); setRes(null);
+    setError(""); setRes(null); setNote("");
     try {
-      const r = await jpost<{ columns: string[]; rows: Record<string, unknown>[]; error?: string; truncated?: boolean }>("/api/datasets/query", { sql });
-      if (r.error) setError(r.error); else setRes(r);
+      if (isRead) {
+        const r = await jpost<{ columns: string[]; rows: Record<string, unknown>[]; error?: string; truncated?: boolean }>("/api/datasets/query", { sql });
+        if (r.error) setError(r.error); else setRes(r);
+      } else {
+        const r = await jpost<{ ok?: boolean; rowsAffected?: number; error?: string }>("/api/datasets/exec", { sql });
+        if (r.error) setError(r.error);
+        else { setNote(`${r.rowsAffected ?? 0} row${r.rowsAffected === 1 ? "" : "s"} affected.`); onChanged(); }
+      }
+    } catch (e) { setError(String((e as Error).message)); }
+  };
+  const saveAsDataset = async () => {
+    setError("");
+    const name = prompt("New dataset name for this query's result:");
+    if (!name) return;
+    try {
+      const r = await jpost<{ id?: string; error?: string }>("/api/datasets/query-to-dataset", { sql, name });
+      if (r.error || !r.id) setError(r.error || "could not create dataset");
+      else onSaved(r.id);
     } catch (e) { setError(String((e as Error).message)); }
   };
   return (
-    <Modal onClose={onClose} title="SQL query" wide>
-      <p className="text-[11.5px] text-faint mb-2">Read-only SELECT across all dataset tables. Join, aggregate, filter — the way an agent queries the data.</p>
+    <Modal onClose={onClose} title="SQL console" wide>
+      <p className="text-[11.5px] text-faint mb-2">
+        <b>SELECT/WITH</b> to read; <b>INSERT/UPDATE/DELETE</b> to edit data in place. Join, aggregate, filter across all
+        dataset tables, with <span className="mono">REGEXP</span>, <span className="mono">regexp_extract</span> and
+        <span className="mono"> regexp_replace</span>. Save a SELECT as its own dataset. (Same power agents have.)
+      </p>
       <textarea className="input mono" style={{ height: 90, padding: 10, lineHeight: 1.5 }} value={sql} onChange={(e) => setSql(e.target.value)} />
       <div className="flex gap-2 mt-2">
-        <button className="btn btn-primary btn-sm" onClick={run}><Icon name="play" size={13} /> Run</button>
+        <button className="btn btn-primary btn-sm" onClick={run}>
+          <Icon name="play" size={13} /> {isRead ? "Run" : "Run (writes data)"}
+        </button>
+        <button className="btn btn-sm" onClick={saveAsDataset} disabled={!isRead} title={isRead ? "" : "Only SELECT/WITH can be saved as a dataset"}>
+          <Icon name="database" size={13} /> Save as dataset…
+        </button>
       </div>
+      {note && <div className="text-[12px] text-success mt-3">{note}</div>}
       {error && <div className="text-[12px] text-danger mt-3">{error}</div>}
       {res && (
         <div className="card overflow-auto mt-3" style={{ maxHeight: 360 }}>

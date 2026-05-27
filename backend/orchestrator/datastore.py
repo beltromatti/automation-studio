@@ -45,6 +45,42 @@ _conn: sqlite3.Connection | None = None
 
 
 # ---------------------------------------------------------------------- connection
+def _register_funcs(c: sqlite3.Connection) -> None:
+    """Give agents/power-users real text power in SQL (SQLite has none built in):
+    REGEXP (so `col REGEXP '...'` works), plus regexp_extract / regexp_replace —
+    the difference between "clean/extract links from messy text in one query" and
+    having to pull data out to a script."""
+    def _re_search(pattern, value):
+        if value is None or pattern is None:
+            return 0
+        try:
+            return 1 if re.search(pattern, str(value)) else 0
+        except re.error:
+            return 0
+
+    def _re_extract(value, pattern, group=0):
+        if value is None or pattern is None:
+            return None
+        try:
+            m = re.search(pattern, str(value))
+            return m.group(int(group)) if m else None
+        except (re.error, IndexError):
+            return None
+
+    def _re_replace(value, pattern, repl):
+        if value is None or pattern is None:
+            return value
+        try:
+            return re.sub(pattern, repl if repl is not None else "", str(value))
+        except re.error:
+            return value
+
+    c.create_function("regexp", 2, _re_search, deterministic=True)
+    c.create_function("regexp_extract", 2, _re_extract, deterministic=True)
+    c.create_function("regexp_extract", 3, _re_extract, deterministic=True)
+    c.create_function("regexp_replace", 3, _re_replace, deterministic=True)
+
+
 def _db() -> sqlite3.Connection:
     global _conn
     if _conn is None:
@@ -54,6 +90,7 @@ def _db() -> sqlite3.Connection:
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA foreign_keys=ON")
         c.execute("PRAGMA busy_timeout=5000")
+        _register_funcs(c)
         c.execute(
             """CREATE TABLE IF NOT EXISTS datasets (
                    id TEXT PRIMARY KEY,
@@ -623,6 +660,7 @@ def query(sql: str, max_rows: int = 5000) -> dict:
     try:
         ro = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         ro.row_factory = sqlite3.Row
+        _register_funcs(ro)
         try:
             ro.execute("PRAGMA query_only=ON")
             cur = ro.execute(s)
@@ -635,6 +673,79 @@ def query(sql: str, max_rows: int = 5000) -> dict:
             ro.close()
     except sqlite3.Error as e:
         return {"error": str(e)}
+
+
+# write-SQL guards: only DML, and never with the registry/system tables as the
+# write TARGET (reading them in a subquery, or mentioning the word in a value, is
+# fine — we match just the table being written to).
+_DML = re.compile(r"^(insert|update|delete)\b", re.IGNORECASE)
+_WRITE_TARGET = re.compile(r'^(?:insert\s+into|update|delete\s+from)\s+"?([a-zA-Z_][a-zA-Z0-9_]*)"?', re.IGNORECASE)
+_PROTECTED_TABLES = {"datasets", "dataset_columns"}
+
+
+def query_to_dataset(sql: str, name: str, dedup_keys: list[str] | None = None,
+                     max_rows: int = 50000) -> dict:
+    """Run a read-only SELECT/WITH and materialise the result as a NEW dataset
+    (columns = the query's output columns, types inferred). The one-shot way to
+    extract/clean/reshape across messy tables into a fresh, tidy dataset — e.g.
+    pull every URL out of several incoherent tables into one column."""
+    res = query(sql, max_rows)
+    if res.get("error"):
+        return res
+    cols = res.get("columns") or []
+    rows = res.get("rows") or []
+    if not cols:
+        return {"error": "query returned no columns"}
+    # infer type per column: number if every present value is numeric, else text
+    def _is_num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    specs = []
+    for col in cols:
+        vals = [r.get(col) for r in rows if r.get(col) is not None]
+        typ = "number" if vals and all(_is_num(v) for v in vals) else "text"
+        specs.append({"display": col, "type": typ})
+    ds = create_dataset(name or "Query result", specs, dedup_keys=dedup_keys,
+                        source={"kind": "query", "sql": sql})
+    app = append_rows(ds["id"], rows, dedup=bool(dedup_keys))
+    out = get_dataset(ds["id"])
+    out["materialized"] = app
+    out["truncated"] = res.get("truncated", False)
+    return out
+
+
+def exec_sql(sql: str) -> dict:
+    """Run a single data-mutating statement (INSERT / UPDATE / DELETE) against the
+    dataset tables — full power to clean, transform and move data in place with
+    WHERE/JOIN/expressions and the regexp_* helpers. The registry tables
+    (datasets, dataset_columns) are off-limits (use the dedicated tools); schema
+    changes go through add/drop/rename_column. Returns rows affected."""
+    s = (sql or "").strip().rstrip(";").strip()
+    if not s:
+        return {"error": "empty statement"}
+    if ";" in s:
+        return {"error": "only a single statement is allowed"}
+    if not _DML.match(s):
+        return {"error": "only INSERT/UPDATE/DELETE are allowed here; use studio_query_to_dataset to "
+                         "create datasets and the add/drop/rename_column tools for schema changes"}
+    m = _WRITE_TARGET.match(s)
+    target = (m.group(1) if m else "").lower()
+    if target in _PROTECTED_TABLES or target.startswith("sqlite_"):
+        return {"error": "the dataset registry/system tables are managed by the dedicated dataset tools, "
+                         "not raw SQL"}
+    with _lock:
+        try:
+            cur = _db().execute(s)
+            _db().commit()
+            # keep updated_at honest for any dataset whose physical table we wrote
+            tbls = {row["table_name"] for row in _db().execute("SELECT table_name FROM datasets").fetchall()}
+            now = time.time()
+            for t in tbls:
+                if re.search(r"\b" + re.escape(t) + r"\b", s):
+                    _db().execute("UPDATE datasets SET updated_at=? WHERE table_name=?", (now, t))
+            _db().commit()
+            return {"ok": True, "rowsAffected": cur.rowcount}
+        except sqlite3.Error as e:
+            return {"error": str(e)}
 
 
 def schema_summary() -> list[dict]:

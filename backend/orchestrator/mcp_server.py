@@ -100,6 +100,16 @@ def t_query_data(a):
     return _api("POST", "/api/datasets/query", {"sql": a["sql"], "maxRows": a.get("maxRows", 1000)})
 
 
+def t_query_to_dataset(a):
+    return _api("POST", "/api/datasets/query-to-dataset",
+                {"sql": a["sql"], "name": a.get("name", "Query result"),
+                 "dedupKeys": a.get("dedupKeys"), "maxRows": a.get("maxRows", 50000)})
+
+
+def t_exec_sql(a):
+    return _api("POST", "/api/datasets/exec", {"sql": a["sql"]})
+
+
 def t_dataset_rows(a):
     qs = f"limit={a.get('limit', 100)}&offset={a.get('offset', 0)}&search={a.get('search', '')}"
     return _api("GET", f"/api/datasets/{a['datasetId']}/rows?{qs}")
@@ -446,8 +456,13 @@ STUDIO_TOOLS = [
      {"type": "object", "properties": {}}, t_list_datasets),
     ("studio_dataset_schema", "Get every dataset's physical SQL table name and columns, so you can write SQL for studio_query_data.",
      {"type": "object", "properties": {}}, t_dataset_schema),
-    ("studio_query_data", "Run a read-only SELECT/WITH query across the dataset tables (join/aggregate/filter). Use the PHYSICAL table names (ds_<id>) and column names from studio_dataset_schema, not display names.",
+    ("studio_query_data", "Run a read-only SELECT/WITH query across the dataset tables (join/aggregate/filter/UNION). Use the PHYSICAL table names (ds_<id>) and column names from studio_dataset_schema, not display names. Text power available: REGEXP, regexp_extract(value,pattern[,group]), regexp_replace(value,pattern,repl).",
      {"type": "object", "properties": {"sql": {"type": "string"}, "maxRows": {"type": "integer"}}, "required": ["sql"]}, t_query_data),
+    ("studio_query_to_dataset", "Run a read-only SELECT/WITH and SAVE the result as a NEW dataset (columns = the query's output columns, types inferred). The one-shot way to extract/clean/reshape across messy or multiple tables into a fresh tidy dataset — e.g. SELECT regexp_extract(notes,'https?://\\S+') AS url FROM ds_a WHERE notes REGEXP 'http' UNION ... Use studio_dataset_schema for physical table/column names.",
+     {"type": "object", "properties": {"sql": {"type": "string"}, "name": {"type": "string"},
+                                       "dedupKeys": {"type": "array"}, "maxRows": {"type": "integer"}}, "required": ["sql", "name"]}, t_query_to_dataset),
+    ("studio_exec_sql", "Run a single INSERT/UPDATE/DELETE against the dataset tables to clean/transform/move data IN PLACE, with full WHERE/JOIN/expressions and the regexp_* helpers (e.g. UPDATE ds_x SET domain=regexp_extract(url,'https?://([^/]+)',1); DELETE FROM ds_x WHERE url NOT REGEXP 'linkedin'). Use physical names from studio_dataset_schema. The registry tables are off-limits; schema changes go through the add/drop/rename_column tools. Returns rows affected.",
+     {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}, t_exec_sql),
     ("studio_dataset_rows", "Read rows from a dataset (paginated, optional text search).",
      {"type": "object", "properties": {"datasetId": {"type": "string"}, "limit": {"type": "integer"},
                                        "offset": {"type": "integer"}, "search": {"type": "string"}}, "required": ["datasetId"]}, t_dataset_rows),
