@@ -314,11 +314,20 @@ class RunManager:
                 self.settings.update(json.loads(SETTINGS_FILE.read_text()))
         except Exception:
             pass
+        migrated = False
         try:
             if RUNS_INDEX.exists():
                 for d in json.loads(RUNS_INDEX.read_text()):
                     fields = {k: d[k] for k in Run.__dataclass_fields__ if k in d}
                     r = Run(**fields)
+                    # Legacy runs stored timestamps in MILLISECONDS (~1.78e12); the
+                    # current code uses seconds (~1.78e9). Migrate so "X ago" and the
+                    # duration display correctly instead of "-1777…s".
+                    for attr in ("createdAt", "startedAt", "finishedAt"):
+                        v = getattr(r, attr, None)
+                        if isinstance(v, (int, float)) and v > 1e11:
+                            setattr(r, attr, v / 1000.0)
+                            migrated = True
                     if r.status not in TERMINAL:
                         r.status = "failed"
                         r.error = r.error or "interrupted (backend restarted)"
@@ -331,6 +340,8 @@ class RunManager:
                         self.logs[r.id] = lf.read_text(errors="replace").splitlines()[-MAX_LOG_LINES:]
         except Exception:
             pass
+        if migrated:
+            self._save()  # persist the seconds migration so it's a one-time fix
 
     def _save(self) -> None:
         try:

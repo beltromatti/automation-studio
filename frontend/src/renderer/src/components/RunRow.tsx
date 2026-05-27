@@ -10,6 +10,7 @@ const isEphemeral = (id: string) => id === "ephemeral" || id === "temporary" || 
 export function RunRow({ run }: { run: Run }) {
   const { runs } = useRuns();
   const q = run.params?.query ? String(run.params.query) : "";
+  const active = ACTIVE.includes(run.status);
   // A persistent profile runs one run at a time; show when this one waits behind another.
   const waiting =
     run.status === "queued" &&
@@ -25,7 +26,8 @@ export function RunRow({ run }: { run: Run }) {
           {q && <span className="text-muted font-normal"> · {q}</span>}
         </div>
         <div className="text-[11px] text-faint mono truncate">
-          {run.id} · {timeAgo(run.createdAt)}
+          {run.id}
+          {run.startedAt && ` · took ${duration(run.startedAt, run.finishedAt)}`}
           {run.rows != null && ` · ${run.rows} rows`}
           {waiting && ` · waiting for ${run.profileName}`}
         </div>
@@ -41,7 +43,7 @@ export function RunRow({ run }: { run: Run }) {
           {run.progress.collected}/{run.progress.total}
         </div>
       )}
-      <div className="text-[11px] text-faint shrink-0 w-14 text-right">{duration(run.startedAt, run.finishedAt)}</div>
+      <div className="text-[11px] text-faint shrink-0 w-20 text-right">{active ? duration(run.startedAt) : timeAgo(run.createdAt)}</div>
       {run.watch && run.browserOpen && (
         <span className="text-[10px] px-1.5 py-0.5 rounded shrink-0" style={{ background: "#f5a62320", color: "#f5a623" }}>
           visible
