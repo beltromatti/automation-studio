@@ -18,6 +18,7 @@ Two namespaces of tools:
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -361,7 +362,14 @@ def _fmt_node(n: dict) -> str:
     return f'[{n["index"]}]<{n.get("tag", "")}{attr}>{body}{_frame_marker(n.get("frame", ""))}{off}'
 
 
-def _outline(d: dict, max_chars: int = 14_000) -> str:
+def _node_key(n: dict) -> tuple:
+    """Identity for dedup: same tag + accessible name + href => 'the same kind of
+    control' (e.g. a card's 6 identical photo links)."""
+    a = n.get("attrs") or {}
+    return (n.get("tag"), (n.get("name") or "").strip(), a.get("href"))
+
+
+def _outline(d: dict, max_chars: int = 14_000, dedup: bool = False) -> str:
     nodes = d.get("nodes") or d.get("elements") or []
     header = (
         f'URL: {d.get("url", "")}\nTITLE: {d.get("title", "")}\n'
@@ -369,18 +377,81 @@ def _outline(d: dict, max_chars: int = 14_000) -> str:
         f'{"[more below — scroll]" if d.get("has_more_below") else "[bottom]"}\n'
         f'INTERACTIVE ELEMENTS: {d.get("num_elements", 0)}{" (truncated)" if d.get("truncated") else ""} '
         f'— "@shadow"/"@iframe" mark elements reachable only via observe+click (not eval); '
-        f'"(offscreen)" = not in viewport. Use browser_inspect for xpath/coords to disambiguate.\n--- page ---\n'
+        f'"(offscreen)" = not in viewport. Use browser_inspect for xpath/coords to disambiguate'
+        f'{", browser_extract for repeated structured data" if not dedup else ""}.\n--- page ---\n'
     )
-    lines = []
+    lines: list[str] = []
+    # consecutive-run dedup: collapse a run of identical look-alike elements into
+    # one line with a "(xN, idx ...)" tag, so repeated cards/photo-links don't drown
+    # the snapshot. A text node (or a different element) breaks the run. Off by
+    # default — the full snapshot stays available for precise/low-level work.
+    pend = None  # {"line": str, "idxs": [int], "key": tuple}
+
+    def flush():
+        if not pend:
+            return
+        if len(pend["idxs"]) > 1:
+            shown = ", ".join(str(i) for i in pend["idxs"][:5])
+            more = "…" if len(pend["idxs"]) > 5 else ""
+            lines.append(f'{pend["line"]}  (×{len(pend["idxs"])} similar — idx {shown}{more})')
+        else:
+            lines.append(pend["line"])
+
     for n in nodes:
-        if n.get("type") == "element" or "index" in n:
+        is_el = n.get("type") == "element" or "index" in n
+        if dedup and is_el:
+            k = _node_key(n)
+            if pend and pend["key"] == k:
+                pend["idxs"].append(n.get("index"))
+                continue
+            flush()
+            pend = {"line": _fmt_node(n), "idxs": [n.get("index")], "key": k}
+            continue
+        flush(); pend = None
+        if is_el:
             lines.append(_fmt_node(n))
         elif n.get("text"):
             lines.append(n["text"])
+    flush()
     body = "\n".join(l for l in lines if l)
     if len(body) > max_chars:
-        body = body[:max_chars] + "\n… [snapshot truncated — browser_inspect to zoom, or raise maxNodes]"
+        body = body[:max_chars] + "\n… [snapshot truncated — browser_inspect/browser_extract to zoom, dedup=true, or raise maxNodes]"
     return header + body
+
+
+_EXTRACT_JS = r"""(() => {
+  const CONTAINER = __CONTAINER__, FIELDS = __FIELDS__, LIMIT = __LIMIT__;
+  const txt = (el) => el ? (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim() : null;
+  const one = (el, spec) => {
+    if (!spec || spec === 'text') return txt(el);
+    let sel = spec, attr = null; const at = spec.indexOf('@');
+    if (at >= 0) { sel = spec.slice(0, at); attr = spec.slice(at + 1); }
+    const t = sel ? el.querySelector(sel) : el;
+    if (!t) return null;
+    if (attr) { const v = t.getAttribute(attr); return v == null ? null : v; }
+    return txt(t);
+  };
+  let items = [], used = CONTAINER;
+  if (CONTAINER) {
+    items = Array.from(document.querySelectorAll(CONTAINER));
+  } else {
+    const sig = new Map();
+    document.querySelectorAll('*').forEach(el => {
+      if (!el.querySelector('a[href]')) return;
+      if ((el.innerText || '').replace(/\s+/g, ' ').trim().length < 40) return;
+      const cls = (el.getAttribute('class') || '').trim().split(/\s+/).filter(Boolean).slice(0, 3).join('.');
+      const k = el.tagName.toLowerCase() + (cls ? '.' + cls : '');
+      (sig.get(k) || sig.set(k, []).get(k)).push(el);
+    });
+    let bestN = 2;
+    for (const [k, els] of sig) if (els.length > bestN) { bestN = els.length; items = els; used = k; }
+  }
+  const fields = (FIELDS && Object.keys(FIELDS).length) ? FIELDS : { text: 'text', href: 'a@href' };
+  const rows = items.slice(0, LIMIT).map(el => {
+    const r = {}; for (const [n, s] of Object.entries(fields)) r[n] = one(el, s); return r;
+  });
+  return { container: used || null, count: rows.length, rows };
+})"""
 
 
 def t_browser_goto(a):
@@ -397,7 +468,26 @@ def t_browser_observe(a):
     if a.get("format") == "full":
         return {k: d.get(k) for k in ("url", "title", "scroll_y", "scroll_height",
                                       "has_more_below", "num_elements", "truncated")} | {"elements": d.get("elements")}
-    return _outline(d)
+    return _outline(d, dedup=bool(a.get("dedup")))
+
+
+def t_browser_extract(a):
+    """Structured bulk extraction from repeated page content — light-DOM, deterministic,
+    one call. Returns a row per matched container."""
+    err = _need_browser()
+    if err:
+        return err
+    container = a.get("container")
+    fields = a.get("fields") or {}
+    limit = int(a.get("limit", 200))
+    js = (_EXTRACT_JS
+          .replace("__CONTAINER__", json.dumps(container) if container else "null")
+          .replace("__FIELDS__", json.dumps(fields))
+          .replace("__LIMIT__", str(limit)))
+    r = _ctrl("POST", "/eval", {"script": js})
+    if r.get("error"):
+        return r
+    return r.get("result")
 
 
 def t_browser_inspect(a):
@@ -496,7 +586,18 @@ def t_browser_eval(a):
 
 
 def t_browser_screenshot(_a):
-    return _need_browser() or _ctrl("GET", "/screenshot")
+    err = _need_browser()
+    if err:
+        return err
+    r = _ctrl("GET", "/screenshot")
+    path = r.get("path") if isinstance(r, dict) else None
+    if not path:
+        return r
+    try:  # return the image INLINE (no Read round-trip), with the path as fallback
+        with open(path, "rb") as f:
+            return {"path": path, "image_b64": base64.b64encode(f.read()).decode(), "mimeType": "image/png"}
+    except Exception:
+        return {"path": path}
 
 
 def t_browser_current_url(_a):
@@ -606,8 +707,10 @@ STUDIO_TOOLS = [
 BROWSER_TOOLS = [
     ("browser_goto", "Navigate the owned browser to a URL.",
      {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}, t_browser_goto),
-    ("browser_observe", "Observe the current page: an indexed snapshot of interactive elements + text, descending into shadow DOM and same-origin iframes. Each element shows its [index] (use with browser_click/browser_type), with '@shadow'/'@iframe' marking elements only reachable via observe+click (NOT browser_eval) and '(offscreen)' marking out-of-viewport ones. Pass format='full' to also get every element's xpath, center [x,y], frame and inViewport — use that (or browser_inspect) to tell look-alike controls apart (e.g. an in-card button under <main> vs a duplicate sticky-header one). maxNodes caps the snapshot (default 1200).",
-     {"type": "object", "properties": {"format": {"type": "string", "enum": ["outline", "full"]}, "maxNodes": {"type": "integer"}}}, t_browser_observe),
+    ("browser_observe", "Observe the current page: an indexed snapshot of interactive elements + text, descending into shadow DOM and same-origin iframes. Each element shows its [index] (use with browser_click/browser_type), with '@shadow'/'@iframe' marking elements only reachable via observe+click (NOT browser_eval) and '(offscreen)' marking out-of-viewport ones. Pass format='full' to also get every element's xpath, center [x,y], frame and inViewport — use that (or browser_inspect) to tell look-alike controls apart (e.g. an in-card button under <main> vs a duplicate sticky-header one). Pass dedup=true to collapse runs of identical look-alike elements (e.g. a card's repeated photo links) into one line with a count — great for cutting noise on listing/grid pages (then use browser_extract for the structured data). maxNodes caps the snapshot (default 1200).",
+     {"type": "object", "properties": {"format": {"type": "string", "enum": ["outline", "full"]}, "dedup": {"type": "boolean"}, "maxNodes": {"type": "integer"}}}, t_browser_observe),
+    ("browser_extract", "Bulk-extract structured rows from REPEATED page content in one call (light DOM, deterministic — no parsing round-trips). `container` is a CSS selector for the repeating item (e.g. a listing card); omit it to auto-detect the dominant repeated block (explicit is more reliable). `fields` maps output keys to per-item specs: 'text' or '' = the element's text; 'css-selector' = that child's text; 'css-selector@attr' or '@attr' = an attribute (e.g. {title:'h3', price:'.price', url:'a@href', img:'img@src'}). Returns {container, count, rows}. Use this instead of observe+manual-parse whenever you're scraping many similar items; for precise single controls / shadow-DOM, use browser_observe + browser_inspect.",
+     {"type": "object", "properties": {"container": {"type": "string"}, "fields": {"type": "object"}, "limit": {"type": "integer"}}}, t_browser_extract),
     ("browser_inspect", "Zoom into elements whose accessible name contains `match` (and/or a `tag`, and/or `frame`=main|shadow|iframe) and return full metadata for each: index, tag, name, attrs, inViewport, center [x,y], xpath, frame. The way to disambiguate duplicate/look-alike controls and pick the right [index] before clicking (e.g. choose the Connect whose xpath contains '/main', not the sticky-header twin).",
      {"type": "object", "properties": {"match": {"type": "string"}, "tag": {"type": "string"},
                                        "frame": {"type": "string", "enum": ["main", "shadow", "iframe"]},
@@ -627,7 +730,7 @@ BROWSER_TOOLS = [
      {"type": "object", "properties": {}}, t_browser_read_text),
     ("browser_eval", "Evaluate a JavaScript function in the page (main frame, light DOM) and return the result — full flexibility for custom extraction or clicks. NOTE: main-frame JS cannot see shadow-DOM or cross-origin iframe content; for those use browser_observe/browser_inspect + browser_click by [index].",
      {"type": "object", "properties": {"script": {"type": "string"}}, "required": ["script"]}, t_browser_eval),
-    ("browser_screenshot", "Take a screenshot of the current page; returns the file path.",
+    ("browser_screenshot", "Take a screenshot of the current page — returned INLINE as an image you can see directly (plus the file path). Use it to visually verify a page or read something the DOM snapshot doesn't expose.",
      {"type": "object", "properties": {}}, t_browser_screenshot),
     ("browser_current_url", "Get the current page URL and title.",
      {"type": "object", "properties": {}}, t_browser_current_url),
@@ -707,6 +810,13 @@ def _handle(msg: dict) -> None:
             return
         try:
             out = fn(_coerce_args(name, args))
+            # inline image result (e.g. browser_screenshot): an image block the model
+            # can see directly + a text path fallback. Works for Claude and Codex.
+            if isinstance(out, dict) and out.get("image_b64"):
+                _result(rid, {"content": [
+                    {"type": "image", "data": out["image_b64"], "mimeType": out.get("mimeType", "image/png")},
+                    {"type": "text", "text": json.dumps({"path": out.get("path")})}], "isError": False})
+                return
             text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, default=str)
             is_err = isinstance(out, dict) and bool(out.get("error"))
             _result(rid, {"content": [{"type": "text", "text": text}], "isError": is_err})
