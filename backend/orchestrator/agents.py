@@ -356,7 +356,12 @@ class AgentManager:
 
     # ------------------------------------------------------------------ sessions API
     def list_sessions(self) -> list[dict]:
-        return [asdict(s) for s in sorted(self.sessions.values(), key=lambda s: s.createdAt, reverse=True)]
+        # Most-recent activity first: live sessions (starting/queued/running) on top,
+        # then rested ones by when they last did something. Coherent with runs.
+        def key(s: AgentSession) -> tuple:
+            live = s.status not in TERMINAL
+            return (1 if live else 0, s.finishedAt or s.startedAt or s.createdAt or 0)
+        return [asdict(s) for s in sorted(self.sessions.values(), key=key, reverse=True)]
 
     def get_session(self, sid: str) -> dict | None:
         s = self.sessions.get(sid)

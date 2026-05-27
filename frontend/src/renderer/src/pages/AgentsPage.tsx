@@ -59,8 +59,10 @@ export default function AgentsPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="text-[15px] font-semibold">{a.name}</h3>
+                      {a.builtin
+                        ? <span className="text-[10px] px-1.5 py-0.5 rounded text-faint" style={{ background: "#161616" }}>built-in</span>
+                        : <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#0072f518", color: "#3b9eff" }}>custom</span>}
                       {a.scopes.includes("browser") && <span className="text-[10px] px-1.5 py-0.5 rounded inline-flex items-center gap-1" style={{ background: "#f5a62318", color: "#f5a623" }}><Icon name="globe" size={10} /> browser</span>}
-                      {a.builtin && <span className="text-[10px] px-1.5 py-0.5 rounded text-faint" style={{ background: "#161616" }}>built-in</span>}
                     </div>
                     <p className="text-[12.5px] text-muted mt-1 leading-relaxed line-clamp-2">{a.description || a.systemPrompt || "No description."}</p>
                   </div>

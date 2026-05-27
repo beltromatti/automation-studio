@@ -358,8 +358,16 @@ class RunManager:
         return self.logs.get(rid, [])
 
     # ------------------------------------------------------------------ public API
+    @staticmethod
+    def _activity_key(r: Run) -> tuple:
+        """Order by most-recent activity: live runs (queued/starting/running/
+        controlled) first, then finished ones — each newest-activity first. Coherent
+        with how agent sessions are ordered."""
+        live = r.status not in TERMINAL
+        return (1 if live else 0, r.finishedAt or r.startedAt or r.createdAt or 0)
+
     def list(self) -> list[dict]:
-        return [asdict(r) for r in sorted(self.runs.values(), key=lambda r: r.createdAt, reverse=True)]
+        return [asdict(r) for r in sorted(self.runs.values(), key=self._activity_key, reverse=True)]
 
     def get(self, rid: str) -> dict | None:
         r = self.runs.get(rid)

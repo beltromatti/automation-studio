@@ -27,7 +27,9 @@ export default function AgentSessionPage() {
   const [steer, setSteer] = useState("");
   const [busy, setBusy] = useState(false);
   const liveRef = useRef(true);
-  const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);   // follow the agent (auto-scroll) while pinned to bottom
+  const [showJump, setShowJump] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -49,7 +51,21 @@ export default function AgentSessionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [events.length]);
+  const scrollToBottom = (behavior: ScrollBehavior) => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior });
+  };
+  // When the user scrolls, decide whether to keep following: stuck to bottom →
+  // follow the agent; scrolled up → stop following and offer "jump to latest".
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    stickRef.current = nearBottom;
+    setShowJump(!nearBottom);
+  };
+  // New content → follow it only if pinned to the bottom (terminal-like).
+  useEffect(() => { if (stickRef.current) scrollToBottom("auto"); }, [events.length]);
 
   const sendSteer = async () => {
     const m = steer.trim();
@@ -69,7 +85,9 @@ export default function AgentSessionPage() {
   const inTok = usage?.input_tokens; const outTok = usage?.output_tokens;
 
   return (
-    <>
+    // Three fixed zones like a terminal/agent UI: header + status pinned on top,
+    // the transcript scrolls in the middle (auto-follows the agent), input pinned below.
+    <div className="h-full flex flex-col min-h-0">
       <Header
         title={<span className="flex items-center gap-2"><Link to="/agents" className="text-muted hover:text-fg">Agents</Link><Icon name="chevronRight" size={14} /><span className="font-semibold">{s.agentName}</span></span>}
         actions={
@@ -79,14 +97,21 @@ export default function AgentSessionPage() {
           </>
         }
       />
-      <div className="px-7 py-6 max-w-[1000px]">
-        <div className="card p-4 mb-4 flex items-center gap-3 flex-wrap">
+
+      {/* status bar — fixed */}
+      <div className="shrink-0 px-7 pt-4 pb-3 border-b" style={{ borderColor: "var(--color-line)" }}>
+        <div className="max-w-[1000px] flex items-center gap-3 flex-wrap">
           <span className="inline-flex items-center gap-1.5 text-[12px] px-2 py-0.5 rounded-md" style={{ background: `${c}1e`, color: c }}>
-            <span className="w-1.5 h-1.5 rounded-full" style={{ background: c }} /> {s.status}
+            <span className="w-1.5 h-1.5 rounded-full" style={{ background: c, animation: inFlight ? "pulse 1.2s infinite" : undefined }} /> {s.status}
           </span>
           <span className="text-[11.5px] text-faint">{s.engine}</span>
           <span className="inline-flex items-center gap-1 text-[11.5px] px-2 py-0.5 rounded-md" style={{ background: "#161616" }}><Icon name="user" size={12} /> {s.profileName}</span>
           {s.scopes.map((sc) => <span key={sc} className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#0072f518", color: "#3b9eff" }}>{sc}</span>)}
+          {s.runIds.length > 0 && (
+            <span className="text-[11px] text-faint flex items-center gap-1">
+              <Icon name="terminal" size={12} /> {s.runIds.map((r) => <Link key={r} to={`/runs/${r}`} className="mono text-running hover:underline">{r}</Link>)}
+            </span>
+          )}
           <span className="text-[11px] text-faint mono ml-auto">
             {s.turns} turn{s.turns !== 1 ? "s" : ""}
             {inTok != null && ` · ${(inTok / 1000).toFixed(1)}k in / ${((outTok ?? 0) / 1000).toFixed(1)}k out`}
@@ -94,29 +119,34 @@ export default function AgentSessionPage() {
             {` · ${inFlight ? duration(s.startedAt) : timeAgo(s.createdAt)}`}
           </span>
         </div>
-
         {s.status === "failed" && s.error && (
-          <div className="mb-4 text-[12.5px] rounded-lg px-3 py-2.5" style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>
+          <div className="max-w-[1000px] mt-2 text-[12.5px] rounded-lg px-3 py-2" style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>
             <span className="font-medium">Agent failed:</span> {s.error}
             <span className="text-faint"> — send a message to retry/continue.</span>
           </div>
         )}
+      </div>
 
-        {s.runIds.length > 0 && (
-          <div className="flex items-center gap-2 mb-4 text-[12px] text-faint flex-wrap">
-            <Icon name="terminal" size={13} /> launched runs:
-            {s.runIds.map((r) => <Link key={r} to={`/runs/${r}`} className="mono text-running hover:underline">{r}</Link>)}
+      {/* transcript — the only scrolling zone; auto-follows the agent */}
+      <div ref={scrollRef} onScroll={onScroll} className="flex-1 min-h-0 overflow-y-auto px-7 py-4">
+        <div className="max-w-[1000px] flex flex-col gap-2.5">
+          {events.map((e, i) => <EventRow key={i} e={e} />)}
+        </div>
+        {showJump && (
+          <div className="sticky bottom-0 flex justify-center pt-3 pointer-events-none">
+            <button
+              onClick={() => { stickRef.current = true; setShowJump(false); scrollToBottom("smooth"); }}
+              className="btn btn-secondary btn-sm pointer-events-auto"
+              style={{ boxShadow: "0 4px 16px #000a" }}>
+              <Icon name="chevronRight" size={13} className="rotate-90" /> Jump to latest
+            </button>
           </div>
         )}
+      </div>
 
-        <div className="flex flex-col gap-2.5">
-          {events.map((e, i) => <EventRow key={i} e={e} />)}
-          <div ref={endRef} />
-        </div>
-
-        {/* Always available: steer while running, or reactivate a rested session.
-            Native threads are continuable, so even a stopped/ended session resumes. */}
-        <div className="sticky bottom-0 mt-4 pt-3 bg-bg/90 backdrop-blur">
+      {/* message bar — fixed bottom. Steer while running, or reactivate a rested session. */}
+      <div className="shrink-0 border-t px-7 py-3 bg-bg" style={{ borderColor: "var(--color-line)" }}>
+        <div className="max-w-[1000px]">
           {!inFlight && (
             <div className="text-[11px] text-faint mb-1.5 flex items-center gap-1.5">
               <Icon name="refresh" size={11} />
@@ -135,7 +165,7 @@ export default function AgentSessionPage() {
           </div>
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
