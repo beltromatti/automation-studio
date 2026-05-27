@@ -813,9 +813,15 @@ class AgentManager:
             await self._run_turn(s, nxt, resume=True)
             return
         # A notification arrived during this turn → consume it as the next turn,
-        # KEEPING the browser (same as a steer).
-        if self._pending_notes(s) and not (code != 0 or turn_flags.get("turn_error")):
-            await self._wake(s)
+        # KEEPING the browser (same as a steer). Consume directly here (NOT via
+        # _maybe_wake/_wake, whose at-rest guard would no-op because status is still
+        # "running" at this point — that guard is for EXTERNAL wakes when idle).
+        notes = self._pending_notes(s)
+        if notes and not (code != 0 or turn_flags.get("turn_error")):
+            for n in notes:
+                n["delivered"] = True
+            self._save_sessions()
+            await self._run_turn(s, self._wake_prompt(notes), resume=True)
             return
         # Decide the resting status. Engine crash (non-zero exit / top-level turn
         # error) → FAILURE. Otherwise: if a workflow this agent launched is still
