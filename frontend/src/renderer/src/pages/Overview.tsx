@@ -44,7 +44,7 @@ export default function Overview() {
                         <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#f5a62318", color: "#f5a623" }}>uses login</span>
                       )}
                     </div>
-                    <p className="text-[12.5px] text-muted mt-1 leading-relaxed">{w.description}</p>
+                    <p className="text-[12.5px] text-muted mt-1 leading-relaxed line-clamp-2">{w.description}</p>
                   </div>
                 </div>
                 <div className="flex items-center justify-between mt-4 pt-4 border-t" style={{ borderColor: "var(--color-line)" }}>
