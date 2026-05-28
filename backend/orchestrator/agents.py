@@ -36,7 +36,7 @@ SESSIONS_FILE = DATA / "agent_sessions.json"
 SESSIONS_DIR = DATA / "agent_runs"
 BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
 MAX_EVENTS = 4000
-TERMINAL = {"done", "failed", "canceled"}
+TERMINAL = {"done", "failed", "stopped"}  # "canceled" is the legacy name (loaded → "stopped")
 
 ENGINES = {"codex", "claude"}
 
@@ -79,7 +79,7 @@ class AgentSession:
     profileId: str
     profileName: str
     prompt: str
-    status: str                       # queued|starting|running|waiting|scheduled|done|failed|canceled
+    status: str                       # queued|starting|running|waiting|scheduled|done|failed|stopped
     createdAt: float
     watch: bool = False
     startedAt: float | None = None
@@ -94,6 +94,10 @@ class AgentSession:
     # canonical inbox: notifications wake the agent (e.g. a detached workflow it
     # launched finished). Each: {id, kind, payload, createdAt, delivered}.
     notifications: list[dict] = field(default_factory=list)
+    # runs whose terminal state the agent has ALREADY learned inline (via studio_wait_run /
+    # run_status terminal / run_result / run_to_dataset). Suppresses duplicate
+    # workflow_finished notifications so we never tell the agent something it just learned.
+    ackedRuns: list[str] = field(default_factory=list)
     scheduledAt: float | None = None  # when status == "scheduled": the future wake time
     scheduledPrompt: str | None = None  # the prompt to wake with at scheduledAt
 
@@ -202,7 +206,19 @@ def _norm_claude(obj: dict) -> list[dict]:
 
 
 _RUNNING = {"starting", "queued", "running"}  # a turn is in flight (can't reactivate, only queue)
-_AT_REST = {"done", "failed", "canceled", "waiting", "scheduled"}  # reactivatable; waiting/scheduled also auto-resume
+_AT_REST = {"done", "failed", "stopped", "waiting", "scheduled"}  # all reactivatable; waiting/scheduled also auto-resume
+# Safe-preempt notes:
+#   • SAFE = the engine isn't currently waiting on an in-flight tool call we executed
+#     for it. While a tool is in flight, we must NOT preempt — killing the engine then
+#     loses the tool_result the engine is about to consume next.
+#   • Writing a message vs writing a tool_call vs reasoning: from our event normaliser
+#     we only see those as discrete events (message/tool_call/reasoning) on completion;
+#     between events the agent is generating the NEXT thing, so an event-boundary kill
+#     never cuts a message mid-stream from our POV. (For Codex an `agent_message` only
+#     emits on item.completed; for Claude the message blocks come through assistant
+#     events and we only mark "in flight" when a tool call is awaiting its result.)
+NOTIFY_SAFE_TOOLS = {"studio_wait_run", "studio_run_status", "studio_run_result",
+                     "studio_run_to_dataset", "studio_run_logs"}
 BROWSER_ACQUIRE_WAIT = 4.0  # seconds to wait for a busy profile before proceeding browserless
 
 # Canonical, TOOL-AGNOSTIC preamble prepended to every agent's system prompt. It
@@ -494,6 +510,20 @@ class AgentManager:
         self.sessions: dict[str, AgentSession] = {}
         self.events: dict[str, list[dict]] = {}
         self.procs: dict[str, Any] = {}        # session id -> current turn subprocess
+        # Transient per-session bookkeeping for the notification preempt machinery
+        # (NOT persisted — only meaningful while a turn is alive):
+        # _tool_in_flight: count of tool_call events without a matching tool_result yet.
+        #   When 0 → it's a safe boundary to preempt for a pending notification.
+        # _pending_call: FIFO of (tool_name, args) per outstanding tool_call, popped on
+        #   the next tool_result so we can ack the run inline.
+        # _preempt_chain: when set, the post-turn-loop will chain into a new turn with
+        #   this wake prompt (set by _preempt_now during the event loop).
+        self._tool_in_flight: dict[str, int] = {}
+        self._pending_call: dict[str, list[tuple[str | None, dict]]] = {}
+        self._preempt_chain: dict[str, str] = {}
+        # Per-session event subscribers (asyncio Queues) for the SSE stream — pushed
+        # whenever _emit appends an event so the UI renders in real time.
+        self._subscribers: dict[str, list[asyncio.Queue]] = {}
         self._load()
         self._seed()
 
@@ -511,6 +541,8 @@ class AgentManager:
                     s = AgentSession(**{k: d[k] for k in AgentSession.__dataclass_fields__ if k in d})
                     s.controlPort = None      # no browser survives a restart
                     s.pendingSteers = []
+                    if s.status == "canceled":  # legacy name → unified "stopped"
+                        s.status = "stopped"
                     if s.status in ("idle", "waiting"):
                         # legacy rest state, or was waiting on a run that didn't survive
                         # the restart → done (reactivatable; its lock is gone anyway).
@@ -608,6 +640,24 @@ class AgentManager:
                 f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
         except Exception:
             pass
+        # fan out to any live SSE subscribers (no-op if none)
+        for q in list(self._subscribers.get(sid, [])):
+            try:
+                q.put_nowait(ev)
+            except Exception:
+                pass
+
+    def subscribe(self, sid: str) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=2000)
+        self._subscribers.setdefault(sid, []).append(q)
+        return q
+
+    def unsubscribe(self, sid: str, q: asyncio.Queue) -> None:
+        lst = self._subscribers.get(sid) or []
+        try:
+            lst.remove(q)
+        except ValueError:
+            pass
 
     # ------------------------------------------------------------------ defs API
     def list_defs(self) -> list[dict]:
@@ -698,7 +748,7 @@ class AgentManager:
     def steer(self, sid: str, message: str) -> dict:
         """Send a message to a session. If a turn is in flight, it's queued for the
         next turn; otherwise it REACTIVATES the session (resumes the native thread).
-        Works from done/failed/canceled — sessions are continuable."""
+        Works from done/failed/stopped — sessions are continuable."""
         s = self.sessions.get(sid)
         if not s:
             return {"ok": False, "error": "no such session"}
@@ -710,21 +760,46 @@ class AgentManager:
         asyncio.create_task(self._run_turn(s, message, resume=True))
         return {"ok": True, "queued": False}
 
+    def cancel_steer(self, sid: str, steer_index: int) -> dict:
+        """Remove a queued steer (the UI can delete entries from the pending list
+        above the message field)."""
+        s = self.sessions.get(sid)
+        if not s:
+            return {"ok": False, "error": "no such session"}
+        if 0 <= steer_index < len(s.pendingSteers):
+            removed = s.pendingSteers.pop(steer_index)
+            self._emit(sid, {"kind": "system",
+                             "text": f"✕ removed queued message: {removed[:80]}"})
+            self._save_sessions()
+            return {"ok": True, "removed": removed}
+        return {"ok": False, "error": "no such queued message"}
+
     async def stop(self, sid: str) -> dict:
+        """User-initiated stop: behave like a NATURAL turn-end so the rest of the
+        machine (notifications, reactivation) stays coherent. We kill the engine
+        subprocess, release the browser, and rest as `stopped` (which is at-rest like
+        done/failed) — pending notifications still fire on stopped sessions, and the
+        user can steer to reactivate."""
         s = self.sessions.get(sid)
         if not s:
             return {"ok": True}
-        s.status = "canceled"             # signals a queued-acquire loop to abort
+        s.status = "stopped"
         s.pendingSteers.clear()
-        s.scheduledAt = None              # a stopped session never re-fires
+        s.scheduledAt = None
         s.scheduledPrompt = None
         proc = self.procs.get(sid)
         if proc and proc.pid:
             kill_tree(proc.pid)
+        # the engine kill will trip the post-loop preempt/chain path; clear any chain
+        self._preempt_chain.pop(sid, None)
         await self._release_browser(s)
         s.finishedAt = time.time()
         self._emit(sid, {"kind": "system", "text": "■ stopped"})
+        self._emit(sid, {"kind": "status", "status": "stopped"})
         self._save_sessions()
+        # if a notification was waiting for a safe boundary, it now fires (stopped
+        # is at-rest → wake immediately, exactly like done)
+        self._maybe_deliver(s)
         return {"ok": True}
 
     async def shutdown(self) -> None:
@@ -760,19 +835,29 @@ class AgentManager:
         return [n for n in s.notifications if not n.get("delivered")]
 
     def notify(self, sid: str, kind: str, payload: dict) -> None:
-        """Canonical notification entry point: append to the agent's inbox and wake
-        it. Used by the RunManager when a detached workflow the agent launched
-        finishes; extensible to other event kinds later (mid-turn or at-rest)."""
+        """Canonical notification entry point. Tells the agent something it doesn't yet
+        know (e.g. a detached workflow it launched finished). Delivery is symmetric for
+        Claude and Codex:
+          • If the agent already ACKed this run inline (via wait_run/status/result/...
+            tools) → silently skip (no inbox, no 🔔, no wake) — never tell something
+            already learned.
+          • Otherwise inbox it, emit a 🔔 in the transcript, and ask _maybe_deliver to
+            consume it (preempt the turn at a safe boundary, or wake the agent if at
+            rest)."""
         s = self.sessions.get(sid)
         if not s:
             return
+        if kind == "workflow_finished":
+            rid = (payload or {}).get("runId")
+            if rid and rid in s.ackedRuns:
+                return  # already learned inline → nothing to tell
         note = {"id": uuid.uuid4().hex[:8], "kind": kind, "payload": payload,
                 "createdAt": time.time(), "delivered": False}
         s.notifications.append(note)
         summary = self._note_summary(note)
         self._emit(sid, {"kind": "system", "text": f"🔔 {summary}"})
         self._save_sessions()
-        self._maybe_wake(s)
+        self._maybe_deliver(s)
 
     @staticmethod
     def _note_summary(n: dict) -> str:
@@ -791,17 +876,57 @@ class AgentManager:
                      "continue what you were doing, start the next step, or end your turn if there's nothing left.")
         return "\n".join(lines)
 
-    def _maybe_wake(self, s: AgentSession) -> None:
-        """If the agent is at rest (not mid-turn, not user-canceled), start a turn to
-        consume pending notifications."""
-        if s.status in _RUNNING or s.status == "canceled":
-            return  # mid-turn: consumed at turn end; canceled: user stopped it
+    def _maybe_deliver(self, s: AgentSession) -> None:
+        """Symmetric Claude/Codex delivery decision for a session whose inbox just
+        gained a notification (or that just transitioned):
+          • AT REST (done/failed/stopped/waiting/scheduled) → wake immediately, one
+            consolidated wake with all pending notes (they coalesce naturally).
+          • MID-TURN and a tool call is in flight (engine is waiting for our
+            tool_result) → defer; the per-event check in _run_turn will retry as soon
+            as the engine emits the tool_result and the in-flight count drops to 0.
+          • MID-TURN and no tool in flight → preempt the turn at this safe boundary
+            (between events the agent is generating the NEXT thing; cutting here can
+            at worst chop a tool_call/reasoning being typed, never a tool already in
+            flight). The next turn chains immediately with the wake prompt."""
         if not self._pending_notes(s):
             return
+        if s.status in _RUNNING:
+            # mid-turn: preempt at this safe boundary if possible (idempotent — safe
+            # to call even if the proc isn't spawned yet; the event loop will re-call
+            # once it is). Otherwise leave the note in the inbox; the event loop polls
+            # after every event and will retry as soon as the in-flight tool returns.
+            if self._tool_in_flight.get(s.id, 0) == 0:
+                self._preempt_now(s)
+            return
+        # at rest → consolidated wake
         asyncio.create_task(self._wake(s))
 
+    def _preempt_now(self, s: AgentSession) -> None:
+        """Mid-turn preempt at a safe boundary (no in-flight tool result we'd lose).
+        IDEMPOTENT: arms the chain the first time, and kills the proc whenever
+        called (handles the race where a notification arrives BEFORE proc.spawn —
+        the chain is armed without a proc, then the first event the engine emits
+        triggers this again with the proc alive, which kills it). We do NOT mark
+        notes delivered or pre-compute the wake prompt here: that happens in the
+        post-loop, so any notification that arrives after arming but before the
+        chained turn still gets coalesced into the same wake."""
+        first_arm = s.id not in self._preempt_chain
+        if first_arm:
+            self._preempt_chain[s.id] = "1"  # value unused; presence is the flag
+            self._emit(s.id, {"kind": "system",
+                              "text": "⏸ preempting current turn to deliver notification(s)…"})
+        proc = self.procs.get(s.id)
+        if proc and proc.pid:
+            try:
+                kill_tree(proc.pid)
+            except Exception:
+                pass
+
     async def _wake(self, s: AgentSession) -> None:
-        if s.status in _RUNNING or s.status == "canceled":
+        """At-rest wake: consume all pending notes as a single new turn. Resumes the
+        native thread if one exists; otherwise reconstructs the prior I/O so a fresh
+        thread continues with full context (no history loss on first-turn preempt)."""
+        if s.status in _RUNNING:
             return
         notes = self._pending_notes(s)
         if not notes:
@@ -809,7 +934,109 @@ class AgentManager:
         for n in notes:
             n["delivered"] = True
         self._save_sessions()
-        await self._run_turn(s, self._wake_prompt(notes), resume=True)
+        wake = self._wake_prompt(notes)
+        if s.threadId:
+            await self._run_turn(s, wake, resume=True)
+        else:
+            full = self._reconstruct_fresh_prompt(s, s.prompt, wake)
+            await self._run_turn(s, full, resume=False)
+
+    # ---- ack-suppression: the agent learning inline from a tool ----------------
+    def _ack_run(self, s: AgentSession, rid: str | None) -> None:
+        """Mark a run as 'agent already learned its terminal outcome inline'. Removes
+        any still-pending (undelivered) notification for it from the inbox so we don't
+        re-tell the agent something it just saw via a tool result."""
+        if not rid or rid in s.ackedRuns:
+            return
+        s.ackedRuns.append(rid)
+        # drop undelivered notes for this run; preserve delivered history
+        s.notifications = [n for n in s.notifications
+                           if n.get("delivered")
+                           or n.get("kind") != "workflow_finished"
+                           or (n.get("payload") or {}).get("runId") != rid]
+        self._save_sessions()
+
+    def _ack_from_tool_result(self, s: AgentSession, tool: str | None,
+                              args: dict, result_text: str) -> None:
+        """Hook into the engine's tool_result event: if it's one of the run-status
+        tools and its result says the run is terminal, ack it. Studio_wait_run /
+        run_result / run_to_dataset only succeed on a terminal run, so they ack
+        unconditionally. Studio_run_status / run_logs ack only when the result
+        actually carries a terminal status."""
+        if tool not in NOTIFY_SAFE_TOOLS:
+            return
+        rid = (args or {}).get("runId") or (args or {}).get("rid")
+        if not rid:
+            return
+        if tool in ("studio_wait_run", "studio_run_result", "studio_run_to_dataset"):
+            self._ack_run(s, rid)
+            return
+        # run_status / run_logs: parse the result for a terminal status
+        try:
+            parsed = json.loads(result_text) if isinstance(result_text, str) else result_text
+        except Exception:
+            parsed = None
+        st = None
+        if isinstance(parsed, dict):
+            st = parsed.get("status")
+        if not st and isinstance(result_text, str):
+            low = result_text.lower()
+            for t in ("succeeded", "failed", "stopped", "canceled"):
+                if f'"status": "{t}"' in low or f'"status":"{t}"' in low:
+                    st = t; break
+        if st in ("succeeded", "failed", "stopped", "canceled"):
+            self._ack_run(s, rid)
+
+    # ---- first-turn fresh-prompt reconstruction (no threadId yet) --------------
+    def _reconstruct_fresh_prompt(self, s: AgentSession,
+                                  original_prompt: str, wake_prompt: str) -> str:
+        """When the engine never persisted a thread (first turn preempted/killed
+        before its rollout saved), reconstruct the killed turn's I/O as a single
+        fresh prompt so the new native-thread turn picks up coherently — no history
+        loss, no 'starting from scratch'."""
+        header = [
+            "Your previous turn was interrupted before the engine could persist its "
+            "native session, so we're continuing in a FRESH thread with the full "
+            "context of what you already did. Pick up from where you left off — do "
+            "NOT redo work already done.",
+            "",
+            "## Original request",
+            (original_prompt or "(none)").strip(),
+            ""
+        ]
+        body: list[str] = []
+        for ev in self.events.get(s.id, []):
+            k = ev.get("kind")
+            line = None
+            if k == "message":
+                txt = (ev.get("text") or "").strip()
+                if txt:
+                    line = f"\nYou said:\n{txt[:1800]}"
+            elif k == "reasoning":
+                rt = (ev.get("text") or "").strip()
+                if rt:
+                    line = f"\n[thinking] {rt[:600]}"
+            elif k == "tool_call":
+                aj = json.dumps(ev.get("args") or {}, ensure_ascii=False, default=str)
+                if len(aj) > 400:
+                    aj = aj[:400] + "…"
+                line = f"\nTool call: {ev.get('tool') or '?'}({aj})"
+            elif k == "tool_result":
+                ok = "✓" if ev.get("ok", True) else "✗"
+                rs = str(ev.get("result", ""))
+                if len(rs) > 500:
+                    rs = rs[:500] + "…"
+                line = f"Tool result {ok}: {rs}"
+            elif k == "system" and "🔔" in (ev.get("text") or ""):
+                line = ev.get("text")  # surface the notifications already shown
+            if line:
+                body.append(line)
+        # keep total reconstructed body under a safe budget — drop oldest first
+        BUDGET = 12000
+        while body and sum(len(x) for x in body) > BUDGET:
+            body.pop(0)
+        body_section = (["## What you did in the interrupted turn"] + body + [""]) if body else []
+        return "\n".join(header + body_section + ["## Now", wake_prompt])
 
     # ------------------------------------------------------------------ scheduling (Timeline)
     def schedule_wake(self, sid: str, at: float, prompt: str) -> dict:
@@ -824,7 +1051,7 @@ class AgentManager:
         s.scheduledPrompt = prompt or "Scheduled wake — continue your task."
         when = max(0, int(at - time.time()))
         self._emit(sid, {"kind": "system", "text": f"⏰ scheduled a wake in ~{when}s"})
-        if s.status not in _RUNNING and s.status != "canceled":
+        if s.status not in _RUNNING and s.status != "stopped":
             s.status = "scheduled"            # at rest already → reflect it now
             self._emit(sid, {"kind": "status", "status": "scheduled"})
         self._save_sessions()
@@ -896,7 +1123,7 @@ class AgentManager:
         waited = False
         deadline = time.time() + BROWSER_ACQUIRE_WAIT
         while not mgr.claim_profile(s.profileId):
-            if s.status == "canceled":         # stopped while queued
+            if s.status == "stopped":         # stopped while queued
                 raise _Stopped()
             if time.time() >= deadline:
                 note = self._busy_note(s)      # give up the browser this turn, guide instead
@@ -916,7 +1143,7 @@ class AgentManager:
             self._emit(s.id, {"kind": "system", "text": "🔒 " + note})
             return note
         s.controlPort = res.get("port")
-        if s.status == "canceled":             # stopped during acquire → undo
+        if s.status == "stopped":             # stopped during acquire → undo
             await self._release_browser(s)
             raise _Stopped()
         return None
@@ -964,7 +1191,7 @@ class AgentManager:
         try:
             browser_note = await self._ensure_browser(s)  # None, or a guidance note if browserless
         except _Stopped:
-            return  # stopped while queued; status is already "canceled"
+            return  # stopped while queued; status is already "stopped"
         except Exception as e:
             s.status = "failed"; s.error = str(e); s.finishedAt = time.time()
             self._emit(s.id, {"kind": "error", "text": str(e)})
@@ -1019,6 +1246,10 @@ class AgentManager:
             s.status = "failed"; s.error = str(e); s.finishedAt = time.time(); self._save_sessions()
             return
         self.procs[s.id] = proc
+        # reset transient preempt bookkeeping at turn start (a previous turn may have
+        # left non-zero in-flight counts after a kill; new turn starts from scratch)
+        self._tool_in_flight[s.id] = 0
+        self._pending_call[s.id] = []
         turn_flags: dict = {}
         drain = asyncio.create_task(self._drain_stderr(s.id, proc.stderr, turn_flags))
         while True:
@@ -1037,16 +1268,34 @@ class AgentManager:
                 continue
             for ev in normalize(obj):
                 self._emit(s.id, ev)
-                # a top-level error event (codex turn.failed / claude result error)
-                # means the agentic loop itself broke — distinct from a tool error.
-                if ev.get("kind") == "error":
+                kind = ev.get("kind")
+                # ----- preempt-safety bookkeeping + ack-suppression -----
+                if kind == "tool_call":
+                    self._tool_in_flight[s.id] = self._tool_in_flight.get(s.id, 0) + 1
+                    self._pending_call.setdefault(s.id, []).append(
+                        (ev.get("tool"), ev.get("args") or {}))
+                elif kind == "tool_result":
+                    self._tool_in_flight[s.id] = max(0, self._tool_in_flight.get(s.id, 0) - 1)
+                    calls = self._pending_call.get(s.id) or []
+                    if calls:
+                        tname, targs = calls.pop(0)
+                        self._ack_from_tool_result(s, tname, targs, ev.get("result") or "")
+                elif kind == "error":
+                    # a top-level error event (codex turn.failed / claude result error)
+                    # means the agentic loop itself broke — distinct from a tool error.
                     turn_flags["turn_error"] = True
                     turn_flags["turn_error_msg"] = ev.get("text")
                 # track runs the agent started (tool_result of studio_run_workflow carries runId)
-                if ev.get("kind") == "tool_result" and ev.get("tool") in ("studio_run_workflow", ""):
+                if kind == "tool_result" and ev.get("tool") in ("studio_run_workflow", ""):
                     rid = _extract_run_id(ev.get("result"))
                     if rid and rid not in s.runIds:
                         s.runIds.append(rid)
+                # ----- preempt opportunity: notification pending + safe boundary -----
+                # _preempt_now is idempotent: arms the chain on first call AND kills the
+                # proc; subsequent calls just re-kill if somehow the proc is still alive
+                # (e.g. a pre-spawn arming followed by the first engine event arriving).
+                if self._pending_notes(s) and self._tool_in_flight.get(s.id, 0) == 0:
+                    self._preempt_now(s)  # kill_tree → next readline returns empty
         code = await proc.wait()
         try:
             await asyncio.wait_for(drain, timeout=2)
@@ -1054,16 +1303,41 @@ class AgentManager:
             pass
         self.procs.pop(s.id, None)
         s.turns += 1
+        # Preempted by an incoming notification → chain into a fresh turn with the
+        # wake prompt. The wake is computed HERE (not at preempt time) so any
+        # additional notifications that landed after arming get coalesced in. Resume
+        # the native thread when we have one; otherwise reconstruct the killed turn's
+        # I/O as a fresh prompt so first-turn preempt loses no history (no engine
+        # rollout yet on the very first turn).
+        if self._preempt_chain.pop(s.id, None) is not None and s.status != "stopped":
+            notes = self._pending_notes(s)
+            for n in notes:
+                n["delivered"] = True
+            self._save_sessions()
+            wake = self._wake_prompt(notes) if notes else "Resuming after a preempt."
+            if s.threadId:
+                await self._run_turn(s, wake, resume=True)
+            else:
+                full = self._reconstruct_fresh_prompt(s, s.prompt or prompt, wake)
+                await self._run_turn(s, full, resume=False)
+            return
         # Resume failed (e.g. the prior turn was interrupted before the engine
         # saved its rollout) → fall back to a fresh turn so the message still runs.
-        if code != 0 and resume_attempted and turn_flags.get("resume_failed") and not _retry and s.status != "canceled":
-            self._emit(s.id, {"kind": "system", "text": "↻ couldn't resume the previous thread — starting a fresh session for this message"})
+        # CRITICAL: preserve the killed turn's I/O via reconstruction, so a fresh
+        # restart doesn't lose what the agent already did.
+        if code != 0 and resume_attempted and turn_flags.get("resume_failed") and not _retry and s.status != "stopped":
+            self._emit(s.id, {"kind": "system",
+                              "text": "↻ couldn't resume the previous thread — starting a fresh session WITH the prior context preserved"})
             s.threadId = None
-            await self._run_turn(s, prompt, resume=False, _retry=True)
+            full = self._reconstruct_fresh_prompt(s, s.prompt or "", prompt)
+            await self._run_turn(s, full, resume=False, _retry=True)
             return
-        if s.status == "canceled":
+        if s.status == "stopped":
             await self._release_browser(s)
             self._save_sessions()
+            # if a notification was queued while we were running, it can now wake the
+            # stopped (at-rest) session — exactly the same as done/failed
+            self._maybe_deliver(s)
             return
         # A message queued during this turn → continue immediately, KEEPING the
         # browser (no restart between back-to-back turns).
@@ -1072,10 +1346,11 @@ class AgentManager:
             self._save_sessions()
             await self._run_turn(s, nxt, resume=True)
             return
-        # A notification arrived during this turn → consume it as the next turn,
-        # KEEPING the browser (same as a steer). Consume directly here (NOT via
-        # _maybe_wake/_wake, whose at-rest guard would no-op because status is still
-        # "running" at this point — that guard is for EXTERNAL wakes when idle).
+        # A notification arrived during this turn but we never hit a safe boundary
+        # (e.g. it arrived while a tool was in flight and the engine finished cleanly
+        # right after). Consume it now as a fresh turn KEEPING the browser — the
+        # ack-suppression rule already removed anything the agent learned inline, so
+        # this fallback is usually a no-op (or one note).
         notes = self._pending_notes(s)
         if notes and not (code != 0 or turn_flags.get("turn_error")):
             for n in notes:
