@@ -1,7 +1,8 @@
 // All API calls go to the local backend, whose URL the Electron preload injects.
-const BASE: string =
+export const BACKEND_URL: string =
   (typeof window !== "undefined" && (window as { api?: { backendUrl?: string } }).api?.backendUrl) ||
   "http://127.0.0.1:8765";
+const BASE = BACKEND_URL;
 
 export async function jget<T>(url: string): Promise<T> {
   const r = await fetch(BASE + url, { cache: "no-store" });

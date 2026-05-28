@@ -7,7 +7,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
-import { jget, jpost, duration, timeAgo, untilTime } from "@/lib/client";
+import { jget, jpost, duration, timeAgo, untilTime, BACKEND_URL } from "@/lib/client";
 import type { AgentEvent, AgentSession } from "@/lib/types";
 
 const STATUS_COLOR: Record<string, string> = {
@@ -75,31 +75,37 @@ export default function AgentSessionPage() {
   const stickRef = useRef(true);   // follow the agent (auto-scroll) while pinned to bottom
   const [showJump, setShowJump] = useState(false);
 
-  // Session metadata refresh (status/usage/pendingSteers/threadId/runIds) — events
-  // alone don't carry all of these. Cheap and called: on mount, on visibility →
-  // visible, and after we mutate (steer/cancel-steer/stop).
+  // Session metadata refresh (status/usage/pendingSteers/threadId/runIds). The
+  // SSE stream is the authoritative source for events; metadata isn't carried by
+  // events, so we refetch it on mount, on visibility/focus, and after mutations.
+  // Note: we deliberately IGNORE the `events` field of this response — SSE replays
+  // the full backlog on connect, and mixing both would duplicate every event.
   const refreshMeta = useCallback(async () => {
     try {
-      const d = await jget<{ session: AgentSession; events: AgentEvent[] }>(`/api/agents/sessions/${id}`);
+      const d = await jget<{ session: AgentSession }>(`/api/agents/sessions/${id}`);
       setS(d.session);
-      // events from SSE are authoritative for the live stream; only seed from this
-      // fetch on the FIRST load, when the SSE hasn't replayed the backlog yet.
-      setEvents((prev) => (prev.length === 0 ? d.events : prev));
     } catch {}
   }, [id]);
 
   // ----- SSE: the chat streams live; no polling. The stream replays the backlog
-  // on connect (sees an `event: ready` after) so reconnects don't miss anything,
-  // and keeps the chat updating in background too (no foreground-only refresh bug).
+  // on connect, emits an `event: ready` marker after replay, then keeps pushing
+  // live events — so the UI never freezes when the window loses focus, and we
+  // never miss an event on (re)connect.
+  // IMPORTANT: must use the absolute backend URL (the renderer is served from
+  // electron-vite in dev / file:// in prod — a bare /api path won't reach the
+  // Python backend on its own port).
   useEffect(() => {
     let stopped = false;
     let es: EventSource | null = null;
     refreshMeta();
+    const url = `${BACKEND_URL}/api/agents/sessions/${id}/events/stream`;
     const connect = () => {
       if (stopped) return;
-      try {
-        es = new EventSource(`/api/agents/sessions/${id}/events/stream`);
-      } catch { return; }
+      // Clear local events ONLY here (each (re)connect rebuilds from the replay,
+      // never duplicating against a previous backlog).
+      setEvents([]);
+      try { es = new EventSource(url); }
+      catch { return; }
       es.onmessage = (msg) => {
         try {
           const ev: AgentEvent = JSON.parse(msg.data);
@@ -110,22 +116,14 @@ export default function AgentSessionPage() {
           }
         } catch {}
       };
-      // on the replay-done marker, REPLACE local events with the canonical backlog
-      // so reconnects don't accumulate duplicates from the seed + replay
-      es.addEventListener("ready", () => {
-        // After ready, future onmessage events are the live stream; the events we
-        // already pushed during the replay phase ARE the canonical history.
-      });
       es.onerror = () => {
-        // EventSource auto-retries; we close + reopen with a small delay on hard error
+        // EventSource auto-retries on transient errors; on a hard close we close
+        // + reopen with a small delay so we don't hot-loop.
         try { es?.close(); } catch {}
         es = null;
         if (!stopped) setTimeout(connect, 1500);
       };
     };
-    // On replay, the stream emits the full backlog first. We want our local `events`
-    // to mirror that backlog. So we WIPE the seed and rebuild from the stream.
-    setEvents([]);
     connect();
     // refresh metadata whenever the window regains focus (status/usage may have
     // moved while we were away — SSE handles events, this catches the rest)
