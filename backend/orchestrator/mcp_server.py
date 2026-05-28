@@ -312,6 +312,146 @@ def t_dataset_dedup(a):
     return _api("POST", f"/api/datasets/{a['datasetId']}/dedup", {"keys": a.get("keys")})
 
 
+# ---- files (the binary-data peer of the data layer) -------------------------
+# These tools front the same content-addressed file store the UI / workflows use;
+# datasets reference files by id (column types `file` / `file_list`), and the
+# orchestrator auto-expands ids → {id,path,name,mime} for workflow input rows
+# and auto-registers paths from `file` output columns on the way out.
+def t_files_register(a):
+    """Register a file already on disk (e.g. one the agent wrote via shell)."""
+    return _api("POST", "/api/files/from-text" if a.get("content") else "",
+                None) if False else _api_register(a)
+
+
+def _api_register(a):
+    body = {"path": a["path"], "name": a.get("name"), "source": a.get("source") or f"agent:{AGENT_SESSION_ID}",
+            "tags": a.get("tags")}
+    # No direct API path takes a server-side path; do it through the backend's
+    # files module via a small dedicated endpoint we add below… or call HTTP-less.
+    # Cleanest: register via the files module directly. The MCP server runs in
+    # the same Python ecosystem (same venv), so this is fine — and avoids
+    # bouncing large files through HTTP unnecessarily.
+    import importlib
+    f = importlib.import_module("orchestrator.files")
+    try:
+        rec = f.register_from_path(a["path"], name=a.get("name"),
+                                   source=a.get("source") or f"agent:{AGENT_SESSION_ID}",
+                                   tags=a.get("tags"))
+        return rec
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def t_files_register_text(a):
+    return _api("POST", "/api/files/from-text", {
+        "content": a["content"], "name": a["name"],
+        "mime": a.get("mime", "text/plain"),
+        "source": a.get("source") or f"agent:{AGENT_SESSION_ID}",
+        "tags": a.get("tags"),
+    }).get("file") or {"error": "register failed"}
+
+
+def t_files_fetch_url(a):
+    """Plain HTTP fetch (no browser cookies). For session-locked assets use the
+    browser_fetch tool instead."""
+    return _api("POST", "/api/files/fetch", {
+        "url": a["url"], "name": a.get("name"),
+        "headers": a.get("headers"), "tags": a.get("tags"),
+        "source": a.get("source") or f"agent:{AGENT_SESSION_ID}",
+    }).get("file") or {"error": "fetch failed"}
+
+
+def t_files_get(a):
+    return _api("GET", f"/api/files/{a['id']}").get("file") or {"error": "not found"}
+
+
+def t_files_view(a):
+    """Get the file's content as text (for textual MIME types) plus its
+    metadata + on-disk path. For images/binary use studio_files_get and read the
+    path with your native Read/view_image tool."""
+    return _api("GET", f"/api/files/{a['id']}/view?max_bytes={int(a.get('maxBytes', 200000))}")
+
+
+def t_files_list(a):
+    qs = []
+    for k in ("mime", "source", "tag", "search"):
+        if a.get(k):
+            qs.append(f"{k}={a[k]}")
+    qs.append(f"limit={int(a.get('limit', 200))}")
+    qs.append(f"offset={int(a.get('offset', 0))}")
+    return _api("GET", "/api/files?" + "&".join(qs))
+
+
+def t_files_search(a):
+    """Substring search on name + tags."""
+    import importlib
+    f = importlib.import_module("orchestrator.files")
+    return {"hits": f.search(a["query"], int(a.get("limit", 50)))}
+
+
+def t_files_rename(a):
+    return _api("POST", f"/api/files/{a['id']}/rename", {"name": a["name"]}).get("file") or {"error": "not found"}
+
+
+def t_files_tag(a):
+    return _api("POST", f"/api/files/{a['id']}/tags", {"tags": a.get("tags") or []}).get("file") or {"error": "not found"}
+
+
+def t_files_copy_to_workspace(a):
+    """Materialise a stored file at a local path so an engine can read/edit it
+    with its native tools (Claude Read/Write/Edit, Codex read_file/apply_patch).
+    Returns the absolute path written."""
+    import importlib
+    f = importlib.import_module("orchestrator.files")
+    try:
+        path = f.copy_to_workspace(a["id"], a.get("dst") or ".")
+        return {"path": path}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def t_files_delete(a):
+    qs = "?force=1" if a.get("force") else ""
+    return _api("DELETE", f"/api/files/{a['id']}{qs}")
+
+
+def t_files_references(a):
+    return _api("GET", f"/api/files/{a['id']}/references")
+
+
+def t_dataset_attach_file(a):
+    """Convenience: set a `file` cell to ``fileId``, or append ``fileId`` to a
+    ``file_list`` cell. Equivalent to studio_dataset_update_cell with the right
+    JSON shape, but doesn't require the caller to know the list-vs-single
+    distinction up front."""
+    # Read the cell's column type, then update appropriately.
+    schema = _api("GET", "/api/datasets/schema").get("schema") or []
+    ds = next((d for d in schema if d["id"] == a["datasetId"]), None)
+    if not ds:
+        return {"error": "dataset not found"}
+    col = next((c for c in ds["columns"] if c["display"] == a["column"] or c["name"] == a["column"]), None)
+    if not col:
+        return {"error": f"column not in dataset: {a['column']}"}
+    if col["type"] == "file_list":
+        # read current cell, append the new id, then set
+        rows = _api("GET", f"/api/datasets/{a['datasetId']}/rows?limit=5000").get("rows") or []
+        cur = next((r for r in rows if r.get("_rid") == int(a["rowId"])), None)
+        existing = []
+        if cur:
+            v = cur.get(col["display"]) or cur.get(col["name"])
+            if v and isinstance(v, str) and v.strip().startswith("["):
+                try:
+                    existing = json.loads(v)
+                except ValueError:
+                    existing = []
+        if a["fileId"] not in existing:
+            existing.append(a["fileId"])
+        return _api("POST", f"/api/datasets/{a['datasetId']}/cell",
+                    {"rid": int(a["rowId"]), "column": col["display"], "value": json.dumps(existing)})
+    return _api("POST", f"/api/datasets/{a['datasetId']}/cell",
+                {"rid": int(a["rowId"]), "column": col["display"], "value": a["fileId"]})
+
+
 # ---- profiles & workflows ----------------------------------------------------
 def t_list_profiles(_a):
     items = _api("GET", "/api/profiles").get("profiles", [])
@@ -620,6 +760,10 @@ def t_browser_eval(a):
 
 
 def t_browser_screenshot(_a):
+    """Take a screenshot of the current page. The PNG is registered in the
+    Studio file store and the file record (id, path, name, mime, size) is
+    returned — use studio_files_get / your native view_image / Read on the path
+    to inspect the image."""
     err = _need_browser()
     if err:
         return err
@@ -627,15 +771,191 @@ def t_browser_screenshot(_a):
     path = r.get("path") if isinstance(r, dict) else None
     if not path:
         return r
-    try:  # return the image INLINE (no Read round-trip), with the path as fallback
-        with open(path, "rb") as f:
-            return {"path": path, "image_b64": base64.b64encode(f.read()).decode(), "mimeType": "image/png"}
-    except Exception:
-        return {"path": path}
+    import importlib
+    fmod = importlib.import_module("orchestrator.files")
+    try:
+        rec = fmod.register_from_path(path, name=os.path.basename(path),
+                                      source=f"browser:{AGENT_SESSION_ID or 'unknown'}",
+                                      tags=["screenshot"])
+        try:
+            os.unlink(path)  # the temp screenshot is now in the store; drop the duplicate
+        except OSError:
+            pass
+        return {"file": rec}
+    except Exception as e:
+        return {"path": path, "error": f"registered failed: {e}"}
 
 
 def t_browser_current_url(_a):
     return _need_browser() or _ctrl("GET", "/status")
+
+
+# ---- browser file primitives -------------------------------------------------
+def _resolve_file_or_path(a: dict, want_multiple: bool = False) -> tuple[list[str], list[dict]]:
+    """Resolve a tool's `fileId`/`fileIds`/`path`/`paths` arg into a flat list
+    of on-disk paths (the form set_input_files expects), plus the resolved
+    file records (None entries for raw paths) — so we can echo metadata back."""
+    import importlib
+    f = importlib.import_module("orchestrator.files")
+    ids = a.get("fileIds") or ([a["fileId"]] if a.get("fileId") else [])
+    paths = a.get("paths") or ([a["path"]] if a.get("path") else [])
+    out_paths: list[str] = []
+    out_recs: list[dict] = []
+    for fid in ids:
+        rec = f.get(str(fid))
+        if not rec:
+            raise ValueError(f"file id not found: {fid}")
+        out_paths.append(rec["path"])
+        out_recs.append(rec)
+    for p in paths:
+        out_paths.append(str(p))
+        out_recs.append({"path": str(p), "id": None, "name": os.path.basename(str(p))})
+    if not out_paths:
+        raise ValueError("provide fileId/fileIds or path/paths")
+    if not want_multiple and len(out_paths) > 1:
+        out_paths = out_paths[:1]; out_recs = out_recs[:1]
+    return out_paths, out_recs
+
+
+def t_browser_upload(a):
+    err = _need_browser()
+    if err:
+        return err
+    try:
+        paths, recs = _resolve_file_or_path(a, want_multiple=bool(a.get("multiple")))
+    except ValueError as e:
+        return {"error": str(e)}
+    # Pass original names + mimes alongside the paths so the page sees the
+    # human filename (Reddit/LinkedIn etc. show it in the form), not the
+    # content-addressed sha256.ext that lives in the store.
+    names = [rec.get("name") or "" for rec in recs]
+    mimes = [rec.get("mime") or "" for rec in recs]
+    r = _ctrl("POST", "/act", {"action": "upload", "index": int(a["index"]),
+                               "files": paths, "names": names, "mimes": mimes})
+    if isinstance(r, dict) and r.get("error"):
+        return r
+    return {"ok": True, "uploaded": [{"id": rec.get("id"), "name": rec.get("name"),
+                                      "mime": rec.get("mime"), "path": p}
+                                     for rec, p in zip(recs, paths)]}
+
+
+def t_browser_capture_download(a):
+    """Wrap a click that triggers a download: returns a registered file id."""
+    err = _need_browser()
+    if err:
+        return err
+    body = {"action": "download_click", "index": int(a["index"]),
+            "timeout_ms": int(a.get("timeoutSec", 30) * 1000)}
+    r = _ctrl("POST", "/act", body, timeout=float(a.get("timeoutSec", 30)) + 10)
+    if isinstance(r, dict) and r.get("error"):
+        return r
+    res = (r or {}).get("result") or {}
+    path = res.get("path")
+    if not path:
+        return {"error": "no path returned by download capture", "raw": r}
+    import importlib
+    fmod = importlib.import_module("orchestrator.files")
+    try:
+        rec = fmod.register_from_path(path, name=a.get("name") or res.get("suggested_filename") or os.path.basename(path),
+                                      source=f"browser:{AGENT_SESSION_ID or 'unknown'}")
+        # the tempfile patchright wrote to can be unlinked now (we have it in the store)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return {"file": rec, "url": res.get("url")}
+    except Exception as e:
+        return {"error": f"download captured but registration failed: {e}", "path": path}
+
+
+def t_browser_expect_download(a):
+    """Wait for the NEXT download triggered by page JS / a click you already did
+    (no click here). Useful for two-step download flows."""
+    err = _need_browser()
+    if err:
+        return err
+    r = _ctrl("POST", "/act", {"action": "expect_download",
+                               "timeout_ms": int(a.get("timeoutSec", 30) * 1000)},
+              timeout=float(a.get("timeoutSec", 30)) + 10)
+    if isinstance(r, dict) and r.get("error"):
+        return r
+    res = (r or {}).get("result") or {}
+    path = res.get("path")
+    if not path:
+        return {"error": "no download captured", "raw": r}
+    import importlib
+    fmod = importlib.import_module("orchestrator.files")
+    try:
+        rec = fmod.register_from_path(path, name=a.get("name") or res.get("suggested_filename") or os.path.basename(path),
+                                      source=f"browser:{AGENT_SESSION_ID or 'unknown'}")
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return {"file": rec, "url": res.get("url")}
+    except Exception as e:
+        return {"error": f"download captured but registration failed: {e}", "path": path}
+
+
+def t_browser_fetch(a):
+    """HTTP GET via the browser's request context — sends the session cookies
+    (the right tool for session-locked downloads, e.g. an image inside a
+    logged-in profile page)."""
+    err = _need_browser()
+    if err:
+        return err
+    r = _ctrl("POST", "/act", {"action": "fetch", "url": a["url"],
+                               "headers": a.get("headers") or {},
+                               "timeout_ms": int(a.get("timeoutSec", 30) * 1000)},
+              timeout=float(a.get("timeoutSec", 30)) + 10)
+    if isinstance(r, dict) and r.get("error"):
+        return r
+    res = (r or {}).get("result") or {}
+    if not res.get("ok"):
+        return {"error": f"HTTP {res.get('status')}: {res.get('statusText', '')}"}
+    path = res.get("path")
+    if not path:
+        return {"error": "fetch did not save a temp file"}
+    import importlib
+    fmod = importlib.import_module("orchestrator.files")
+    try:
+        # Trust the HTTP Content-Type as the authoritative mime (overrides our
+        # magic-byte sniff): the server told us exactly what it served.
+        rec = fmod.register_from_path(path,
+                                      name=a.get("name") or res.get("suggested_filename") or os.path.basename(path),
+                                      source=f"browser:{AGENT_SESSION_ID or 'unknown'}",
+                                      mime=res.get("contentType") or None)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return {"file": rec, "url": res.get("url"), "status": res.get("status")}
+    except Exception as e:
+        return {"error": f"fetched but registration failed: {e}", "path": path}
+
+
+def t_browser_file_chooser(a):
+    """For sites where the upload UI is a custom button that opens the OS file
+    picker (no `<input type=file>` reachable directly): clicks ``index`` while
+    expecting a file chooser to open, then provides the file(s) to it."""
+    err = _need_browser()
+    if err:
+        return err
+    try:
+        paths, recs = _resolve_file_or_path(a, want_multiple=bool(a.get("multiple")))
+    except ValueError as e:
+        return {"error": str(e)}
+    names = [rec.get("name") or "" for rec in recs]
+    mimes = [rec.get("mime") or "" for rec in recs]
+    r = _ctrl("POST", "/act", {"action": "file_chooser", "index": int(a["index"]),
+                               "files": paths, "names": names, "mimes": mimes,
+                               "timeout_ms": int(a.get("timeoutSec", 15) * 1000)},
+              timeout=float(a.get("timeoutSec", 15)) + 10)
+    if isinstance(r, dict) and r.get("error"):
+        return r
+    return {"ok": True, "uploaded": [{"id": rec.get("id"), "name": rec.get("name"),
+                                      "mime": rec.get("mime"), "path": p}
+                                     for rec, p in zip(recs, paths)]}
 
 
 STUDIO_TOOLS = [
@@ -736,6 +1056,49 @@ STUDIO_TOOLS = [
      {"type": "object", "properties": {"name": {"type": "string"}}}, t_create_profile),
     ("studio_delete_workflow", "Delete a user/agent-created workflow (built-ins can't be deleted).",
      {"type": "object", "properties": {"workflowId": {"type": "string"}}, "required": ["workflowId"]}, t_delete_workflow),
+    # ---- files: the binary-data peer of the data layer ---------------------
+    # Files are content-addressed in the same data dir; the SQLite `files` table
+    # holds metadata + tags. Datasets reference files by id via `file` /
+    # `file_list` typed columns — the orchestrator auto-expands these to
+    # {id,path,name,mime} dicts on workflow input and auto-registers paths
+    # emitted in `file`-typed output columns on the way out, so an agent can
+    # pipe files through workflows just like text.
+    ("studio_files_register", "Register a file already on disk into the store (use this after you've written a file via your native tools). Returns the file record {id, sha256, name, mime, size, path}.",
+     {"type": "object", "properties": {"path": {"type": "string"}, "name": {"type": "string"},
+                                       "source": {"type": "string"}, "tags": {"type": "array"}},
+      "required": ["path"]}, t_files_register),
+    ("studio_files_register_text", "Create + register a file from text content (great for prompts, README snippets, CSV / JSON / markdown). Returns the file record.",
+     {"type": "object", "properties": {"content": {"type": "string"}, "name": {"type": "string"},
+                                       "mime": {"type": "string"}, "source": {"type": "string"},
+                                       "tags": {"type": "array"}}, "required": ["content", "name"]}, t_files_register_text),
+    ("studio_files_fetch_url", "Plain HTTP fetch (no browser cookies) → register. For session-locked downloads (e.g. an asset inside a logged-in page) use browser_fetch instead.",
+     {"type": "object", "properties": {"url": {"type": "string"}, "name": {"type": "string"},
+                                       "headers": {"type": "object"}, "source": {"type": "string"},
+                                       "tags": {"type": "array"}}, "required": ["url"]}, t_files_fetch_url),
+    ("studio_files_get", "Get a file's full record (metadata + on-disk path). For text/code/json/csv content use studio_files_view; for images / binary read the path with your native Read/view_image tool.",
+     {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}, t_files_get),
+    ("studio_files_view", "Get a textual file's content as a string (for text/html/json/csv/yaml/xml etc.), plus the record. Non-textual files return {text:null,textual:false}; for those, read the `path` with your native Read/view_image tool.",
+     {"type": "object", "properties": {"id": {"type": "string"}, "maxBytes": {"type": "integer"}}, "required": ["id"]}, t_files_view),
+    ("studio_files_list", "List files with filters. `mime` accepts a glob (e.g. 'image/*'), `source` is a prefix (e.g. 'run:' to find run-produced files, 'browser:' for downloads), `tag` is exact match, `search` is a substring of the name.",
+     {"type": "object", "properties": {"mime": {"type": "string"}, "source": {"type": "string"},
+                                       "tag": {"type": "string"}, "search": {"type": "string"},
+                                       "limit": {"type": "integer"}, "offset": {"type": "integer"}}}, t_files_list),
+    ("studio_files_search", "Substring search across file names + tags — the quick lookup when you remember roughly what a file is called.",
+     {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}, t_files_search),
+    ("studio_files_rename", "Rename a file's display name (the on-disk blob and id are unchanged).",
+     {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}}, "required": ["id", "name"]}, t_files_rename),
+    ("studio_files_tag", "Set the user tags on a file (replaces existing tags). Pass [] to clear.",
+     {"type": "object", "properties": {"id": {"type": "string"}, "tags": {"type": "array"}}, "required": ["id", "tags"]}, t_files_tag),
+    ("studio_files_copy_to_workspace", "Materialise a stored file at a local path (defaults to current working directory) so your native tools can read / edit it (Claude Read/Write/Edit, Codex read_file/apply_patch/view_image). Returns the absolute path written.",
+     {"type": "object", "properties": {"id": {"type": "string"}, "dst": {"type": "string"}}, "required": ["id"]}, t_files_copy_to_workspace),
+    ("studio_files_delete", "Delete a file registration. Refuses (and lists the referencing cells) if any dataset cell still uses this file; pass force=true to delete anyway. When the last registration for a physical blob is removed, the on-disk blob is unlinked too.",
+     {"type": "object", "properties": {"id": {"type": "string"}, "force": {"type": "boolean"}}, "required": ["id"]}, t_files_delete),
+    ("studio_files_references", "List every dataset cell (dataset id/name, column, row id) that references this file. Use before delete, or to find which workflows would consume this file.",
+     {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}, t_files_references),
+    ("studio_dataset_attach_file", "Attach a stored file to a dataset cell. For a `file` column it sets the cell to fileId; for a `file_list` column it appends fileId to the list. rowId is the row's `_rid` from studio_dataset_rows.",
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "rowId": {"type": "integer"},
+                                       "column": {"type": "string"}, "fileId": {"type": "string"}},
+      "required": ["datasetId", "rowId", "column", "fileId"]}, t_dataset_attach_file),
 ]
 
 BROWSER_TOOLS = [
@@ -768,6 +1131,27 @@ BROWSER_TOOLS = [
      {"type": "object", "properties": {}}, t_browser_screenshot),
     ("browser_current_url", "Get the current page URL and title.",
      {"type": "object", "properties": {}}, t_browser_current_url),
+    # ---- file primitives (the agent's full media/file power on the browser) ---
+    ("browser_upload", "Upload one or more files to a `<input type=file>` element at [index]. Accepts `fileId` (a Studio file in the store) OR `path` (a raw filesystem path), OR `fileIds`/`paths` for multi-file inputs (set multiple=true). Works on hidden file inputs too — you do NOT need browser_file_chooser for the standard `<input>` case.",
+     {"type": "object", "properties": {"index": {"type": "integer"},
+                                       "fileId": {"type": "string"}, "path": {"type": "string"},
+                                       "fileIds": {"type": "array"}, "paths": {"type": "array"},
+                                       "multiple": {"type": "boolean"}}, "required": ["index"]}, t_browser_upload),
+    ("browser_capture_download", "Click the element at [index] AND capture the download it triggers, in one call. The captured file is saved into the Studio file store and the new file record (id, path, name, mime, size) is returned. Use for download links / 'export CSV' buttons / anything click-triggered. timeoutSec defaults to 30.",
+     {"type": "object", "properties": {"index": {"type": "integer"}, "name": {"type": "string"},
+                                       "timeoutSec": {"type": "number"}}, "required": ["index"]}, t_browser_capture_download),
+    ("browser_expect_download", "Wait for the NEXT download triggered by page JS (without doing a click here) — use after kicking off a multi-step flow whose second step issues a download. Saves to the file store and returns the new file record.",
+     {"type": "object", "properties": {"name": {"type": "string"}, "timeoutSec": {"type": "number"}}}, t_browser_expect_download),
+    ("browser_fetch", "HTTP GET via the browser's request context — sends the page's session cookies, so it can pull session-locked assets (an image inside a logged-in profile, an authenticated API endpoint, etc.). The response body is saved into the Studio file store and the new file record is returned. Use plain studio_files_fetch_url for public URLs that don't need cookies.",
+     {"type": "object", "properties": {"url": {"type": "string"}, "name": {"type": "string"},
+                                       "headers": {"type": "object"}, "timeoutSec": {"type": "number"}},
+      "required": ["url"]}, t_browser_fetch),
+    ("browser_file_chooser", "For sites where the upload UI is a custom button that opens the OS file picker and no `<input type=file>` is reachable directly: clicks the button at [index] WHILE expecting a file-chooser, then provides the file(s) to it. Most uploaders have a hidden `<input>` and browser_upload is enough — try that first; use this when it doesn't.",
+     {"type": "object", "properties": {"index": {"type": "integer"},
+                                       "fileId": {"type": "string"}, "path": {"type": "string"},
+                                       "fileIds": {"type": "array"}, "paths": {"type": "array"},
+                                       "multiple": {"type": "boolean"}, "timeoutSec": {"type": "number"}},
+      "required": ["index"]}, t_browser_file_chooser),
 ]
 
 
@@ -821,12 +1205,60 @@ def _error(rid, code: int, message: str) -> None:
     _send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
 
 
+_FILE_URI_RE = __import__("re").compile(r"^studio://files/([0-9a-f]{8})$")
+
+
+def _resources_list() -> list[dict]:
+    """Advertise Studio files as MCP resources (Codex 0.119+ resolves these and
+    can ``view_image`` / ``read_file`` them; Claude headless ignores resources
+    but tools still return paths it can `Read`). Returns the most recent 200
+    files — agents can also call studio_files_list for filtering."""
+    out: list[dict] = []
+    try:
+        d = _api("GET", "/api/files?limit=200")
+        for f in d.get("files") or []:
+            out.append({
+                "uri": f"studio://files/{f['id']}",
+                "name": f["name"],
+                "description": f"{f['mime']} · {f['size']} bytes · src={f.get('source') or '?'}",
+                "mimeType": f["mime"],
+            })
+    except Exception as e:
+        _log(f"resources/list failed: {e}")
+    return out
+
+
+def _resources_read(uri: str) -> dict:
+    """Read a `studio://files/<id>` resource. Returns text (utf-8 decoded) for
+    textual mimes; otherwise base64-encoded bytes."""
+    m = _FILE_URI_RE.match(uri or "")
+    if not m:
+        return {"error": f"unsupported resource uri: {uri}"}
+    fid = m.group(1)
+    f = _api("GET", f"/api/files/{fid}").get("file")
+    if not f:
+        return {"error": f"file not found: {fid}"}
+    try:
+        with open(f["path"], "rb") as fh:
+            data = fh.read()
+    except OSError as e:
+        return {"error": f"read failed: {e}"}
+    mime = f["mime"]
+    import importlib
+    fmod = importlib.import_module("orchestrator.files")
+    if fmod.is_textual(mime):
+        return {"contents": [{"uri": uri, "mimeType": mime, "text": data.decode("utf-8", errors="replace")}]}
+    return {"contents": [{"uri": uri, "mimeType": mime, "blob": base64.b64encode(data).decode()}]}
+
+
 def _handle(msg: dict) -> None:
     method = msg.get("method")
     rid = msg.get("id")
     if method == "initialize":
         proto = (msg.get("params") or {}).get("protocolVersion") or PROTOCOL_FALLBACK
-        _result(rid, {"protocolVersion": proto, "capabilities": {"tools": {"listChanged": False}},
+        _result(rid, {"protocolVersion": proto,
+                      "capabilities": {"tools": {"listChanged": False},
+                                       "resources": {"listChanged": False, "subscribe": False}},
                       "serverInfo": {"name": "automation-studio", "version": "0.1.0"}})
     elif method in ("notifications/initialized", "initialized"):
         pass  # notification, no response
@@ -834,6 +1266,11 @@ def _handle(msg: dict) -> None:
         _result(rid, {})
     elif method == "tools/list":
         _result(rid, {"tools": _tool_defs()})
+    elif method == "resources/list":
+        _result(rid, {"resources": _resources_list()})
+    elif method == "resources/read":
+        params = msg.get("params") or {}
+        _result(rid, _resources_read(params.get("uri", "")))
     elif method == "tools/call":
         params = msg.get("params") or {}
         name = params.get("name")
@@ -844,16 +1281,31 @@ def _handle(msg: dict) -> None:
             return
         try:
             out = fn(_coerce_args(name, args))
-            # inline image result (e.g. browser_screenshot): an image block the model
-            # can see directly + a text path fallback. Works for Claude and Codex.
-            if isinstance(out, dict) and out.get("image_b64"):
-                _result(rid, {"content": [
-                    {"type": "image", "data": out["image_b64"], "mimeType": out.get("mimeType", "image/png")},
-                    {"type": "text", "text": json.dumps({"path": out.get("path")})}], "isError": False})
-                return
+            # File-bearing results (browser_screenshot, browser_capture_download,
+            # browser_fetch, …) return `{file: {id, path, mime, …}}` — agents
+            # then `studio_files_view` for text, or use their native Read /
+            # view_image on the path. We also emit a `resource_link` content
+            # block alongside the text so MCP-resource-aware engines (Codex
+            # 0.119+) can resolve the file via the studio:// URI without an
+            # extra tool call.
+            content: list[dict] = []
+            if isinstance(out, dict):
+                # The result is either a file record itself (most studio_files_*
+                # tools return the bare record) or a wrapper `{file: rec, ...}`
+                # (browser_screenshot / capture_download / fetch). Accept both.
+                rec = (out.get("file") if isinstance(out.get("file"), dict) else None) or (
+                    out if (out.get("id") and out.get("mime") and out.get("sha256")) else None
+                )
+                if rec and rec.get("id"):
+                    content.append({"type": "resource_link",
+                                    "uri": f"studio://files/{rec['id']}",
+                                    "name": rec.get("name") or rec["id"],
+                                    "mimeType": rec.get("mime", "application/octet-stream"),
+                                    "description": f"Studio file {rec['id']} · {rec.get('size', '?')} bytes · path={rec.get('path', '')}"})
             text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False, default=str)
+            content.append({"type": "text", "text": text})
             is_err = isinstance(out, dict) and bool(out.get("error"))
-            _result(rid, {"content": [{"type": "text", "text": text}], "isError": is_err})
+            _result(rid, {"content": content, "isError": is_err})
         except Exception as e:
             _log(f"tool {name} failed: {e}")
             _result(rid, {"content": [{"type": "text", "text": f"tool error: {e}"}], "isError": True})

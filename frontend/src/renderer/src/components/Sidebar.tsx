@@ -5,13 +5,14 @@ import { useRuns } from "./RunsProvider";
 import iconUrl from "@/assets/icon.png";
 
 // Conceptually top-down: an agent runs sessions; a workflow spawns runs. So each
-// "thing" sits above its executions: Agents → Sessions → Workflows → Runs → Data → Profiles.
+// "thing" sits above its executions: Agents → Sessions → Workflows → Runs → Data → Files → Profiles.
 const NAV = [
   { href: "/agents", label: "Agents", icon: "sparkles" },
   { href: "/agents/sessions", label: "Sessions", icon: "bot" },
   { href: "/", label: "Workflows", icon: "layers" },
   { href: "/runs", label: "Runs", icon: "terminal" },
   { href: "/data", label: "Data", icon: "database" },
+  { href: "/files", label: "Files", icon: "image" },
   { href: "/profiles", label: "Profiles", icon: "user" },
 ];
 

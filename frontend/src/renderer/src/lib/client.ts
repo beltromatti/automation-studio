@@ -29,8 +29,21 @@ export async function jdel<T>(url: string): Promise<T> {
   return data;
 }
 
+export async function jpostForm<T>(url: string, form: FormData): Promise<T> {
+  // Multipart upload — used by the Files page to upload a real file. Don't set
+  // Content-Type explicitly: the browser sets it (with boundary) for FormData.
+  const r = await fetch(BASE + url, { method: "POST", body: form, cache: "no-store" });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
 export function downloadUrl(path: string): string {
   return BASE + path;
+}
+
+export function fileUrl(id: string, kind: "preview" | "download" = "preview"): string {
+  return BASE + `/api/files/${id}/${kind}`;
 }
 
 // Backend timestamps are epoch SECONDS (Python time.time()).

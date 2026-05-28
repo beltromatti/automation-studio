@@ -41,6 +41,13 @@ const PATHS: Record<string, React.ReactNode> = {
   wand: <><path d="M15 4V2" /><path d="M15 10V8" /><path d="M11.5 6.5h-2" /><path d="M20.5 6.5h-2" /><path d="m3 21 12-12" /><path d="m12.5 6.5 5 5" /></>,
   copy: <><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>,
   download2: <><path d="M12 3v12" /><path d="m7 11 5 5 5-5" /><path d="M5 21h14" /></>,
+  image: <><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="9" cy="9" r="2" /><path d="m21 15-3.5-3.5L9 19" /></>,
+  file: <><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z" /><path d="M14 3v6h6" /></>,
+  paperclip: <><path d="M21 12.5 12.5 21a5.5 5.5 0 0 1-7.8-7.8L13.5 4.5a4 4 0 0 1 5.7 5.7L10.5 19a2.5 2.5 0 0 1-3.5-3.5l8.5-8.5" /></>,
+  upload: <><path d="M12 21V9" /><path d="m7 13 5-5 5 5" /><path d="M5 3h14" /></>,
+  film: <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M7 3v18" /><path d="M17 3v18" /><path d="M3 8h4" /><path d="M3 16h4" /><path d="M17 8h4" /><path d="M17 16h4" /></>,
+  music: <><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /><path d="M9 18V5l12-2v13" /></>,
+  tag: <><path d="m20 13-7 7-9-9V3h8Z" /><circle cx="7.5" cy="7.5" r="1.5" /></>,
 };
 
 export function Icon({ name, size = 16, ...props }: { name: string; size?: number } & SVGProps<SVGSVGElement>) {

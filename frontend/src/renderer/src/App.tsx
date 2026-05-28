@@ -8,6 +8,7 @@ import RunDetail from "@/pages/RunDetail";
 import ProfilesPage from "@/pages/ProfilesPage";
 import DatasetsPage from "@/pages/DatasetsPage";
 import DatasetPage from "@/pages/DatasetPage";
+import FilesPage from "@/pages/FilesPage";
 import AgentsPage from "@/pages/AgentsPage";
 import AgentLaunchPage from "@/pages/AgentLaunchPage";
 import AgentSessionsPage from "@/pages/AgentSessionsPage";
@@ -35,6 +36,7 @@ export default function App() {
             <Route path="/agents/:id" element={<AgentLaunchPage />} />
             <Route path="/data" element={<DatasetsPage />} />
             <Route path="/data/:id" element={<DatasetPage />} />
+            <Route path="/files" element={<FilesPage />} />
             <Route path="/profiles" element={<ProfilesPage />} />
           </Routes>
           </main>

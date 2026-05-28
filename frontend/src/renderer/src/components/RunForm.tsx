@@ -3,8 +3,9 @@ import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { Icon } from "./Icon";
 import { useChromeGate } from "./DependencyModal";
-import { jget, jpost } from "@/lib/client";
-import type { Dataset, Profile, PublicWorkflow, Run } from "@/lib/types";
+import { jget, jpost, jpostForm } from "@/lib/client";
+import type { Dataset, FileList as Files, FileRecord, Profile, PublicWorkflow, Run } from "@/lib/types";
+import { FileThumb, fileIcon } from "./FilePreview";
 
 export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const navigate = useNavigate();
@@ -107,6 +108,17 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
               </select>
+            ) : p.type === "file" ? (
+              <FilePickerInput
+                value={String(values[p.name] ?? "")}
+                onChange={(id) => setValues((v) => ({ ...v, [p.name]: id }))}
+              />
+            ) : p.type === "file_list" ? (
+              <FilePickerInput
+                multiple
+                value={String(values[p.name] ?? "")}
+                onChange={(ids) => setValues((v) => ({ ...v, [p.name]: ids }))}
+              />
             ) : (
               <input
                 className="input"
@@ -205,6 +217,116 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
         </button>
       </div>
       {modal}
+    </div>
+  );
+}
+
+
+// Picker for `file` / `file_list` workflow params. Single mode returns the file
+// id as a string; multi mode returns a JSON array string. Sources files from
+// the store and lets the user upload a new one inline (which becomes selected).
+type FilePickerProps =
+  | { multiple?: false; value: string; onChange: (id: string) => void }
+  | { multiple: true;  value: string; onChange: (ids: string) => void };
+function FilePickerInput(props: FilePickerProps) {
+  const [files, setFiles] = useState<FileRecord[]>([]);
+  const [search, setSearch] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const fileRef = useState<HTMLInputElement | null>(null);
+  const selectedIds = props.multiple
+    ? (() => { try { const j = JSON.parse(props.value); return Array.isArray(j) ? j.map(String) : []; } catch { return []; } })()
+    : (props.value ? [props.value] : []);
+
+  useEffect(() => {
+    const qs = new URLSearchParams();
+    if (search) qs.set("search", search);
+    qs.set("limit", "60");
+    jget<Files>(`/api/files?${qs}`).then((d) => setFiles(d.files)).catch(() => {});
+  }, [search]);
+
+  const toggle = (id: string) => {
+    if (props.multiple) {
+      const cur = selectedIds.slice();
+      const i = cur.indexOf(id);
+      if (i >= 0) cur.splice(i, 1); else cur.push(id);
+      props.onChange(JSON.stringify(cur));
+    } else {
+      props.onChange(selectedIds[0] === id ? "" : id);
+    }
+  };
+
+  const upload = async (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    setBusy(true); setErr("");
+    const uploaded: string[] = [];
+    try {
+      for (const f of Array.from(list)) {
+        const fd = new FormData(); fd.append("file", f); fd.append("name", f.name);
+        const r = await jpostForm<{ file: FileRecord }>("/api/files", fd);
+        uploaded.push(r.file.id);
+      }
+      if (props.multiple) {
+        const cur = selectedIds.slice();
+        for (const id of uploaded) if (cur.indexOf(id) < 0) cur.push(id);
+        props.onChange(JSON.stringify(cur));
+      } else if (uploaded.length) {
+        props.onChange(uploaded[0]);
+      }
+      const d = await jget<Files>(`/api/files?limit=60`);
+      setFiles(d.files);
+    } catch (e) { setErr(String((e as Error).message)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="flex flex-col gap-2 p-2 rounded border" style={{ borderColor: "var(--color-line)" }}>
+      <div className="flex items-center gap-2">
+        <input className="input flex-1" placeholder="Search files…" value={search}
+               onChange={(e) => setSearch(e.target.value)} />
+        <input ref={(r) => { fileRef[0] = r; }} type="file" multiple={props.multiple} className="hidden"
+               onChange={(e) => upload(e.target.files)} />
+        <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => fileRef[0]?.click()}>
+          <Icon name="upload" size={12} className="inline mr-1 align-text-bottom" />
+          {busy ? "Uploading…" : "Upload"}
+        </button>
+      </div>
+      {err && <div className="text-[12px]" style={{ color: "#ff6363" }}>{err}</div>}
+      {selectedIds.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 pb-1 border-b" style={{ borderColor: "var(--color-line)" }}>
+          {selectedIds.map((id) => {
+            const f = files.find((x) => x.id === id);
+            return (
+              <span key={id} className="inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded"
+                    style={{ background: "#0c1c2c", border: "1px solid #1a3550" }}>
+                {f ? <FileThumb file={f} size={18} /> : <Icon name="file" size={12} />}
+                <span className="text-[11px] truncate max-w-40">{f?.name ?? id}</span>
+                <button type="button" onClick={() => toggle(id)} className="opacity-70 hover:opacity-100">
+                  <Icon name="x" size={11} />
+                </button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      <div className="grid gap-1.5 max-h-44 overflow-y-auto"
+           style={{ gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))" }}>
+        {files.map((f) => {
+          const sel = selectedIds.includes(f.id);
+          return (
+            <button key={f.id} type="button" onClick={() => toggle(f.id)}
+                    className="flex items-center gap-1.5 p-1.5 rounded text-left"
+                    style={{ background: sel ? "#0c1c2c" : "#0c0c0c",
+                             border: sel ? "1px solid #1a3550" : "1px solid var(--color-line)" }}>
+              <FileThumb file={f} size={22} />
+              <span className="text-[11px] truncate flex-1">{f.name}</span>
+            </button>
+          );
+        })}
+        {files.length === 0 && (
+          <div className="col-span-full text-center text-faint text-[12px] py-4">No files yet — upload one above.</div>
+        )}
+      </div>
     </div>
   );
 }

@@ -311,8 +311,33 @@ GENERAL_AGENT_PROMPT = (
     "page content) over a duplicate sticky-header or nav element. browser_wait (match=accessible-name, "
     "shadow-aware; or selector=CSS) waits for late or dynamic elements including shadow-DOM dialogs. "
     "browser_eval runs main-frame light-DOM JS for custom extraction but CANNOT see shadow DOM or cross-origin "
-    "iframes - reach those with observe+click. browser_screenshot shows you the page. Always clear "
-    "cookie/consent/login-wall overlays first, and verify each action by observing the result.\n\n"
+    "iframes - reach those with observe+click. browser_screenshot captures the page into the file store and "
+    "returns the file record - use studio_files_view (for text) or your native view_image / Read on the path "
+    "to inspect it. Always clear cookie/consent/login-wall overlays first, and verify each action by observing "
+    "the result.\n\n"
+
+    "FILES (the binary-data peer of the data layer - the same way you handle text/numbers with datasets, you "
+    "handle images/video/PDFs/anything with files): every file lives in one content-addressed store with an "
+    "opaque id; the same content uploaded twice is one blob. Datasets can declare columns of type 'file' "
+    "(single id) or 'file_list' (JSON array of ids), so a row carries pictures or attachments alongside text. "
+    "studio_files_list / studio_files_search / studio_files_get / studio_files_view (text mimes) - inventory + "
+    "reads. studio_files_register / studio_files_register_text / studio_files_fetch_url - create. "
+    "studio_files_rename / studio_files_tag / studio_files_delete (refuses if referenced by dataset cells, "
+    "pass force=true to override) - manage. studio_files_copy_to_workspace materialises a stored file at a "
+    "path so you can read/edit/inspect it with your native tools. studio_dataset_attach_file is the shortcut "
+    "to wire a file id into a dataset cell (handles both single and list columns). When a workflow's "
+    "output_contract declares a 'file' column, the run plumbing auto-registers any path your workflow emits "
+    "and stores the resulting id - so chaining (people-with-image -> workflow that uses image -> output "
+    "dataset with screenshot file) just works.\n\n"
+
+    "BROWSER + FILES: browser_upload(index, fileId) sets a Studio file on a `<input type=file>` element (works "
+    "on hidden inputs - the common pattern where a styled button triggers the real input); browser_file_chooser "
+    "is the fallback for sites whose upload UI bypasses the standard input. browser_capture_download(index) "
+    "wraps a click and grabs the resulting download into the file store in one call; browser_expect_download "
+    "waits for the next page-triggered download. browser_fetch(url) does an HTTP GET via the page's request "
+    "context - it sends the session cookies, so it can pull session-locked assets (image inside a logged-in "
+    "profile, authenticated API endpoint, ...) - use studio_files_fetch_url for plain public URLs without "
+    "cookies. All four save into the file store and return the new file record.\n\n"
     "PROFILES: a workflow that needs auth runs on a logged-in persistent profile (studio_list_profiles shows "
     "the profiles and whether a login window is open); use an ephemeral profile for logged-out or throwaway "
     "work. A persistent profile serves one run at a time, so others queue behind it.\n\n"
@@ -1238,6 +1263,12 @@ class AgentManager:
             "AGENT_SESSION_ID": s.id,         # this SESSION (runs are owned by + notify the session)
             "AGENT_PROFILE_ID": s.profileId,
         }
+        # The MCP server's file tools call `orchestrator.files` *directly* (not
+        # via HTTP) for efficiency on local IO — they need to see the SAME data
+        # dir the backend uses, else `files.search()` etc. open a separate
+        # SQLite at the OS user data dir and find nothing.
+        if os.environ.get("AUTOMATION_DATA_DIR"):
+            env_pairs["AUTOMATION_DATA_DIR"] = os.environ["AUTOMATION_DATA_DIR"]
         if s.controlPort:
             env_pairs["MCP_CONTROL_PORT"] = str(s.controlPort)
 
@@ -1501,7 +1532,14 @@ class AgentManager:
         cmd = [binary, "-p", prompt, "--output-format", "stream-json", "--verbose",
                "--include-partial-messages",   # real per-token streaming of text blocks
                "--model", CLAUDE_MODEL, "--effort", CLAUDE_EFFORT,
-               "--mcp-config", str(cfg_path), "--allowedTools", "mcp__studio",
+               "--mcp-config", str(cfg_path),
+               # Allow Claude's built-in file tools alongside our MCP server, so
+               # the agent can `Read` / `Write` / `Edit` the paths Studio gives
+               # it for `file`-typed dataset cells and workflow outputs (without
+               # this, --allowedTools acts as a strict allow-list and built-ins
+               # are filtered out). Bash too, for the rare case of unzipping /
+               # ffprobing / inspecting a downloaded file.
+               "--allowedTools", "Read,Write,Edit,Bash,mcp__studio",
                "--permission-mode", "bypassPermissions"]
         if sysprompt:
             cmd += ["--append-system-prompt", sysprompt]

@@ -8,7 +8,7 @@ export type RunStatus =
   | "canceled"
   | "controlled"; // paused, browser handed to the human
 
-export type ParamType = "string" | "number" | "boolean" | "select";
+export type ParamType = "string" | "number" | "boolean" | "select" | "file" | "file_list";
 
 export interface WorkflowParam {
   name: string;
@@ -21,7 +21,33 @@ export interface WorkflowParam {
   options?: { value: string; label: string }[]; // for "select"
 }
 
-export type ColumnType = "text" | "number" | "boolean";
+export type ColumnType = "text" | "number" | "boolean" | "file" | "file_list";
+
+export interface FileRecord {
+  id: string;
+  sha256: string;
+  ext: string;
+  name: string;
+  mime: string;
+  size: number;
+  created_at: number;
+  source?: string | null;
+  tags: string[];
+  meta?: unknown;
+  path: string;
+}
+
+export interface FileList {
+  count: number;
+  files: FileRecord[];
+}
+
+export interface FileReference {
+  datasetId: string;
+  datasetName: string;
+  column: string;
+  rid: number;
+}
 
 export interface ContractColumn {
   name: string;

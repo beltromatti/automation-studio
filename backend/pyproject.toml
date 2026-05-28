@@ -10,6 +10,7 @@ dependencies = [
     "uvicorn>=0.29",
     "platformdirs>=4.0",
     "psutil>=5.9",
+    "python-multipart>=0.0.9",
 ]
 
 [project.scripts]

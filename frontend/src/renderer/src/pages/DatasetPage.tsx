@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
+import { FileChip, FileChipList, parseFileList } from "@/components/FilePreview";
 import { jget, jpost, jdel, downloadUrl } from "@/lib/client";
 import type { ColumnType, Dataset, DatasetColumn, DatasetRows } from "@/lib/types";
 
@@ -220,14 +221,21 @@ export default function DatasetPage() {
                     {cols.map((c) => {
                       const editing = edit?.rid === row._rid && edit?.col === c.display;
                       const val = row[c.display];
+                      const isFile = c.type === "file";
+                      const isFileList = c.type === "file_list";
+                      const fileEditable = (isFile || isFileList) ? false : true;
                       return (
                         <td key={c.name} className="px-3 py-2 align-top" style={{ maxWidth: 360 }}
-                            onClick={() => { if (!editing) { setEdit({ rid: row._rid, col: c.display }); setDraft(val == null ? "" : String(val)); } }}>
+                            onClick={() => { if (!editing && fileEditable) { setEdit({ rid: row._rid, col: c.display }); setDraft(val == null ? "" : String(val)); } }}>
                           {editing ? (
                             <input autoFocus className="input" style={{ height: 26, minWidth: 80 }} value={draft}
                                    onChange={(e) => setDraft(e.target.value)} onBlur={commitCell}
                                    onClick={(e) => e.stopPropagation()}
                                    onKeyDown={(e) => { if (e.key === "Enter") commitCell(); if (e.key === "Escape") setEdit(null); }} />
+                          ) : isFile ? (
+                            val ? <FileChip id={String(val)} /> : <span className="text-faint">—</span>
+                          ) : isFileList ? (
+                            <FileChipList ids={parseFileList(val)} />
                           ) : isUrl(val) ? (
                             <a href={String(val)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="text-running hover:underline break-all">{String(val)}</a>
                           ) : (
@@ -424,6 +432,8 @@ function AddColumnModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name:
         <option value="text">text</option>
         <option value="number">number</option>
         <option value="boolean">boolean</option>
+        <option value="file">file (single — image / video / document / …)</option>
+        <option value="file_list">file_list (multiple files)</option>
       </select>
       <button className="btn btn-primary btn-sm" disabled={!name.trim()} onClick={submit}><Icon name="plus" size={13} /> Add column</button>
     </Modal>

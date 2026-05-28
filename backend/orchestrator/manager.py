@@ -617,23 +617,44 @@ class RunManager:
 
     def _input_args(self, run: Run, wf) -> list[str]:
         """For a list-consuming workflow bound to an input dataset, dump the dataset
-        rows to input.json and pass --input-json (read by automations.userkit)."""
+        rows to input.json and pass --input-json (read by automations.userkit).
+
+        File-typed cells (`file` / `file_list` columns) are expanded from bare
+        ids to ``{id, path, name, mime, ...}`` dicts here, so workflow code
+        just reads ``row["image"]["path"]`` without an extra lookup."""
         if not run.inputDatasetId or not getattr(wf, "input_contract", None):
             return []
         try:
-            from . import datastore
+            from . import datastore, files as fstore
+            ds = datastore.get_dataset(run.inputDatasetId)
+            file_cols = {c["display"] for c in (ds.get("columns") or []) if c["type"] == "file"}
+            list_cols = {c["display"] for c in (ds.get("columns") or []) if c["type"] == "file_list"}
             rows, offset = [], 0
             while True:
                 page = datastore.get_rows(run.inputDatasetId, limit=5000, offset=offset)["rows"]
                 if not page:
                     break
-                rows += [{k: v for k, v in r.items() if k != "_rid"} for r in page]
+                for r in page:
+                    row = {k: v for k, v in r.items() if k != "_rid"}
+                    for col in file_cols:
+                        if col in row and row[col] is not None and str(row[col]).strip():
+                            row[col] = fstore.expand_value(row[col])
+                    for col in list_cols:
+                        if col in row and row[col] is not None and str(row[col]).strip():
+                            row[col] = fstore.expand_value(row[col])
+                    rows.append(row)
                 offset += len(page)
                 if len(page) < 5000:
                     break
             p = RUNS_DIR / run.id / "input.json"
             p.write_text(json.dumps(rows))
-            self._log(run.id, f"[backend] input dataset {run.inputDatasetId}: {len(rows)} rows")
+            extras = []
+            if file_cols:
+                extras.append(f"{len(file_cols)} file col{'s' if len(file_cols) != 1 else ''}")
+            if list_cols:
+                extras.append(f"{len(list_cols)} file-list col{'s' if len(list_cols) != 1 else ''}")
+            note = f" ({', '.join(extras)} expanded)" if extras else ""
+            self._log(run.id, f"[backend] input dataset {run.inputDatasetId}: {len(rows)} rows{note}")
             return ["--input-json", str(p)]
         except Exception as e:
             self._log(run.id, f"[backend] input dataset load failed: {e}")

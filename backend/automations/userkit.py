@@ -102,7 +102,9 @@ def run_session(fn: Callable[[dict, Any], Any], params: dict, server: str | None
 
 def write_csv(output: str | None, rows: list[dict], columns: list[str] | None = None) -> None:
     """Write result rows to the run's CSV (``output``) and emit the result event.
-    Columns default to the union of keys in row order."""
+    Columns default to the union of keys in row order. Cells that are lists or
+    dicts are JSON-encoded so a ``file_list`` (list of ids) or a registered
+    file record round-trips through CSV cleanly."""
     rows = list(rows or [])
     if columns is None:
         columns = list({k: None for r in rows for k in r}.keys())
@@ -113,5 +115,60 @@ def write_csv(output: str | None, rows: list[dict], columns: list[str] | None = 
         w = _csv.DictWriter(fh, fieldnames=columns)
         w.writeheader()
         for r in rows:
-            w.writerow({c: ("" if r.get(c) is None else r.get(c)) for c in columns})
+            out_row = {}
+            for c in columns:
+                v = r.get(c)
+                if v is None:
+                    out_row[c] = ""
+                elif isinstance(v, (list, dict)):
+                    out_row[c] = json.dumps(v, ensure_ascii=False)
+                else:
+                    out_row[c] = v
+            w.writerow(out_row)
     _ev.result(output, len(rows))
+
+
+# ---------------------------------------------------------------- files helpers
+# Convenience for workflows that handle media / documents. The orchestrator
+# already auto-expands `file` / `file_list` input columns to dicts before
+# invoking us, and auto-registers raw paths emitted in `file` output columns,
+# so most workflows just read ``row["image"]["path"]`` and write
+# ``row["screenshot"] = "/tmp/shot.png"``. These helpers are for the cases
+# where you want explicit control (tags / source hint / fetching from a URL).
+def input_file(row: dict, column: str) -> dict | None:
+    """Read a single-``file`` input cell. The orchestrator already expanded the
+    cell from a bare id to ``{id, path, name, mime, ...}``; this just returns
+    None for missing / empty values so a workflow can ``if f:`` cleanly."""
+    v = (row or {}).get(column)
+    if isinstance(v, dict) and v.get("path"):
+        return v
+    return None
+
+
+def input_files(row: dict, column: str) -> list[dict]:
+    """Read a ``file_list`` input cell as a list of records. Empty / missing → []."""
+    v = (row or {}).get(column)
+    if isinstance(v, list):
+        return [x for x in v if isinstance(x, dict) and x.get("path")]
+    return []
+
+
+def save_output_file(path: str, *, name: str | None = None, source: str | None = None,
+                     tags: list[str] | None = None) -> str:
+    """Register a local file (produced by this workflow) into the Studio file
+    store; returns the file id you should put in the ``file`` output cell.
+    The orchestrator's auto-capture path also recognises raw paths in output
+    rows, so call this only when you want explicit tags / source hints."""
+    from orchestrator import files as _files
+    rec = _files.register_from_path(path, name=name, source=source or "workflow", tags=tags)
+    return rec["id"]
+
+
+def fetch_url_file(url: str, *, name: str | None = None,
+                   headers: dict | None = None, tags: list[str] | None = None,
+                   source: str | None = None) -> str:
+    """Plain HTTP fetch → store → returns file id."""
+    from orchestrator import files as _files
+    rec = _files.register_from_url(url, name=name, headers=headers,
+                                   source=source or "workflow:fetch", tags=tags)
+    return rec["id"]

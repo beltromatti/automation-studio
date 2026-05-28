@@ -58,6 +58,11 @@ class HumanBrowser:
     async def start(self) -> None:
         _ensure_driver_executable()
         self._pw = await async_playwright().start()
+        # Where patchright drops in-flight downloads BEFORE we save_as() them
+        # into the file store. Fixed location (instead of a random tmpdir) so we
+        # can clean up reliably across runs and never lose a file to PID exit.
+        downloads_path = self.cfg.artifacts_dir / "downloads"
+        downloads_path.mkdir(parents=True, exist_ok=True)
         launch_kwargs: dict[str, Any] = dict(
             user_data_dir=str(self.cfg.user_data_dir),
             headless=self.cfg.headless,
@@ -65,6 +70,8 @@ class HumanBrowser:
             locale=self.cfg.locale,
             viewport={"width": self.cfg.viewport_width, "height": self.cfg.viewport_height},
             device_scale_factor=self.cfg.device_scale_factor,
+            accept_downloads=True,           # default in modern Playwright; explicit for clarity
+            downloads_path=str(downloads_path),
             args=[f"--window-size={self.cfg.viewport_width},{self.cfg.viewport_height + 120}"],
         )
         if self.cfg.timezone_id:
@@ -299,6 +306,145 @@ class HumanBrowser:
     async def get_text(self) -> str:
         return await self._require_page().evaluate("() => document.body.innerText")
 
+    # ------------------------------------------------------------------ files
+    async def upload(self, index: int, files: list, *, names: list | None = None,
+                     mimes: list | None = None) -> dict:
+        """Upload one or more local files to an `<input type=file>` at ``index``.
+        Works even when the input is hidden (the common pattern where a styled
+        button triggers the real `<input>`) — ``set_input_files`` calls the CDP
+        method directly and doesn't gate on visibility.
+
+        When ``names``/``mimes`` are supplied (per-file, parallel to ``files``),
+        we read the bytes and pass FilePayloads to ``set_input_files`` — so the
+        page sees the ORIGINAL filename instead of the content-addressed
+        sha256.ext that lives in the Studio store. Without names, we pass the
+        raw path (fine for raw-path uploads where there's no original name)."""
+        if not files:
+            raise ActionError("upload: provide at least one file path")
+        loc = await self._resolve(index)
+        names = names or []
+        mimes = mimes or []
+        payloads: list[Any] = []
+        for i, p in enumerate(files):
+            nm = (names[i] if i < len(names) else "") or ""
+            mm = (mimes[i] if i < len(mimes) else "") or "application/octet-stream"
+            if nm:
+                # Browser sees this filename + mime; site can't see the on-disk path.
+                with open(p, "rb") as fh:
+                    data = fh.read()
+                payloads.append({"name": nm, "mimeType": mm, "buffer": data})
+            else:
+                payloads.append(str(p))
+        await loc.set_input_files(payloads)
+        await self._think()
+        return {"uploaded": [{"path": str(p),
+                              "name": (names[i] if i < len(names) else None) or os.path.basename(str(p)),
+                              "mime": (mimes[i] if i < len(mimes) else None)}
+                             for i, p in enumerate(files)],
+                "count": len(files)}
+
+    async def download_click(self, index: int, timeout_ms: int = 30_000) -> dict:
+        """Click ``index`` AND capture the resulting download in one call.
+        Saves into ``downloads_path`` and returns the path + suggested filename
+        + originating URL. The caller (MCP server) then registers into the file
+        store and unlinks this temp path."""
+        page = self._require_page()
+        loc = await self._resolve(index)
+        async with page.expect_download(timeout=timeout_ms) as dl_info:
+            await loc.click()
+        dl = await dl_info.value
+        dst = self.cfg.artifacts_dir / "downloads" / dl.suggested_filename
+        # patchright auto-uniquifies via download id; if two downloads share a
+        # suggested name within one session, fall back to download.path() (its
+        # GUID under downloads_path).
+        try:
+            await dl.save_as(str(dst))
+            path = str(dst)
+        except Exception:
+            p = await dl.path()
+            path = str(p) if p else ""
+        return {"path": path, "suggested_filename": dl.suggested_filename, "url": dl.url}
+
+    async def expect_download(self, timeout_ms: int = 30_000) -> dict:
+        """Wait for the next download triggered by page JS (no click here).
+        Same return shape as ``download_click``."""
+        page = self._require_page()
+        async with page.expect_download(timeout=timeout_ms) as dl_info:
+            pass  # the trigger already happened (or will happen) outside us
+        dl = await dl_info.value
+        dst = self.cfg.artifacts_dir / "downloads" / dl.suggested_filename
+        try:
+            await dl.save_as(str(dst))
+            path = str(dst)
+        except Exception:
+            p = await dl.path()
+            path = str(p) if p else ""
+        return {"path": path, "suggested_filename": dl.suggested_filename, "url": dl.url}
+
+    async def fetch(self, url: str, headers: dict | None = None, timeout_ms: int = 30_000) -> dict:
+        """Authenticated HTTP GET via the browser's request context — sends the
+        page's session cookies (right tool for session-locked assets). Writes
+        the body to ``downloads_path`` and returns metadata + path."""
+        if not self.context:
+            raise ActionError("browser not started")
+        resp = await self.context.request.get(url, headers=headers or {}, timeout=timeout_ms)
+        try:
+            body = await resp.body()
+        finally:
+            await resp.dispose()
+        # Derive a sensible filename: Content-Disposition > URL path tail > "download"
+        cd = ""
+        try:
+            cd = (resp.headers or {}).get("content-disposition", "") or ""
+        except Exception:
+            pass
+        import re as _re
+        m = _re.search(r'filename\*?=(?:UTF-8\'\')?"?([^"\;]+)', cd)
+        if m:
+            name = m.group(1)
+        else:
+            from urllib.parse import urlparse
+            tail = (urlparse(url).path or "").rstrip("/").rsplit("/", 1)[-1]
+            name = tail or "download"
+        dst = self.cfg.artifacts_dir / "downloads" / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(body)
+        ctype = (resp.headers or {}).get("content-type", "").split(";")[0].strip() if hasattr(resp, "headers") else ""
+        return {"ok": resp.ok, "status": resp.status, "url": resp.url, "path": str(dst),
+                "suggested_filename": name, "contentType": ctype}
+
+    async def file_chooser(self, index: int, files: list, *, names: list | None = None,
+                           mimes: list | None = None, timeout_ms: int = 15_000) -> dict:
+        """Click ``index`` WHILE expecting a file-chooser popup, then provide
+        the file(s). For sites where the upload UI is a custom button that
+        opens the OS picker (no `<input type=file>` reachable directly).
+        For the standard `<input>` case use ``upload`` — it's simpler."""
+        if not files:
+            raise ActionError("file_chooser: provide at least one file path")
+        page = self._require_page()
+        loc = await self._resolve(index)
+        names = names or []
+        mimes = mimes or []
+        payloads: list[Any] = []
+        for i, p in enumerate(files):
+            nm = (names[i] if i < len(names) else "") or ""
+            mm = (mimes[i] if i < len(mimes) else "") or "application/octet-stream"
+            if nm:
+                with open(p, "rb") as fh:
+                    data = fh.read()
+                payloads.append({"name": nm, "mimeType": mm, "buffer": data})
+            else:
+                payloads.append(str(p))
+        async with page.expect_file_chooser(timeout=timeout_ms) as fc_info:
+            await loc.click()
+        chooser = await fc_info.value
+        await chooser.set_files(payloads)
+        await self._think()
+        return {"uploaded": [{"path": str(p),
+                              "name": (names[i] if i < len(names) else None) or os.path.basename(str(p))}
+                             for i, p in enumerate(files)],
+                "count": len(files), "is_multiple": chooser.is_multiple()}
+
     # ------------------------------------------------------------------ status / dispatch
     async def status(self) -> dict[str, Any]:
         page = self.page
@@ -336,4 +482,21 @@ class HumanBrowser:
             return await getattr(self, action)()
         if action == "wait":
             return await self.wait_for(state=kw.get("state", "networkidle"), timeout=int(kw.get("timeout", 15000)))
+        # files (the MCP server passes file ids → paths before reaching us)
+        if action == "upload":
+            return await self.upload(int(kw["index"]), list(kw.get("files") or []),
+                                     names=list(kw.get("names") or []),
+                                     mimes=list(kw.get("mimes") or []))
+        if action == "download_click":
+            return await self.download_click(int(kw["index"]), timeout_ms=int(kw.get("timeout_ms", 30_000)))
+        if action == "expect_download":
+            return await self.expect_download(timeout_ms=int(kw.get("timeout_ms", 30_000)))
+        if action == "fetch":
+            return await self.fetch(kw["url"], headers=kw.get("headers"),
+                                    timeout_ms=int(kw.get("timeout_ms", 30_000)))
+        if action == "file_chooser":
+            return await self.file_chooser(int(kw["index"]), list(kw.get("files") or []),
+                                           names=list(kw.get("names") or []),
+                                           mimes=list(kw.get("mimes") or []),
+                                           timeout_ms=int(kw.get("timeout_ms", 15_000)))
         raise ActionError(f"unknown action: {action}")

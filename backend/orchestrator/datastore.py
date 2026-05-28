@@ -36,7 +36,11 @@ import sqlite3
 from humanbrowser.config import data_dir
 
 DB_PATH = data_dir() / "studio.sqlite"
-LOGICAL_TYPES = {"text", "number", "boolean"}
+# Logical column types. `file` cells store a single file id (8-hex, from
+# orchestrator.files); `file_list` cells store a JSON array of ids. Both are
+# stored as TEXT — the orchestrator expands ids → {id,path,name,mime} dicts
+# before invoking workflows, and the UI renders thumbnails/icons.
+LOGICAL_TYPES = {"text", "number", "boolean", "file", "file_list"}
 # agents/users naturally write SQL-ish types — map them to our logical types so a
 # column declared `real`/`integer` becomes `number` (values get numeric coercion,
 # so ORDER BY / MIN / MAX work) instead of silently falling back to text.
@@ -45,8 +49,11 @@ _TYPE_ALIASES = {
     "real": "number", "float": "number", "double": "number", "decimal": "number",
     "numeric": "number", "num": "number", "money": "number", "currency": "number",
     "bool": "boolean", "str": "text", "string": "text", "varchar": "text", "char": "text",
+    "img": "file", "image": "file", "video": "file", "audio": "file", "media": "file",
+    "files": "file_list", "images": "file_list", "attachments": "file_list", "media_list": "file_list",
 }
-_AFFINITY = {"text": "TEXT", "number": "NUMERIC", "boolean": "INTEGER"}
+_AFFINITY = {"text": "TEXT", "number": "NUMERIC", "boolean": "INTEGER",
+             "file": "TEXT", "file_list": "TEXT"}
 _RESERVED = {"_rid", "_added_at", "rowid", "oid"}
 
 _lock = threading.RLock()
@@ -377,6 +384,14 @@ def _coerce(value: Any, typ: str) -> Any:
         if isinstance(value, bool):
             return 1 if value else 0
         return 1 if str(value).strip().lower() in {"1", "true", "yes", "y", "on"} else 0
+    if typ == "file_list":
+        # accept a list of ids or a JSON string; always store as a JSON string
+        if isinstance(value, list):
+            return json.dumps([str(x).strip() for x in value if str(x).strip()])
+        s = str(value).strip()
+        if not s:
+            return None
+        return s
     return str(value)
 
 

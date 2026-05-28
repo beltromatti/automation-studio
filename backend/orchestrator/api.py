@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 import asyncio
 import json as jsonmod
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 
@@ -16,6 +16,7 @@ from .manager import get_manager
 from .registry import (all_workflows, get_workflow, public_workflow, save_user_workflow,
                        delete_user_workflow, workflow_source)
 from . import datastore
+from . import files as fstore
 
 
 def _resolve_at(body: dict) -> float | None:
@@ -58,6 +59,56 @@ def _parse_csv(path) -> dict:
     reader = csvmod.DictReader(io.StringIO(text))
     rows = list(reader)
     return {"columns": reader.fieldnames or [], "rows": rows[:5000], "count": len(rows)}
+
+
+def _absorb_run_files(csv_path, run_id: str, file_cols: list[str], list_cols: list[str]):
+    """Read the run's CSV, rewrite path-or-dict values in `file` / `file_list`
+    columns into Studio file ids (auto-registering anything that's a real file),
+    write to a sibling CSV next to the original and return the new path."""
+    import json as _json
+    file_cols_lc = {c.strip().lower() for c in file_cols}
+    list_cols_lc = {c.strip().lower() for c in list_cols}
+    source = f"run:{run_id}"
+    in_text = csv_path.read_text(encoding="utf-8-sig", errors="replace")
+    reader = csvmod.DictReader(io.StringIO(in_text))
+    header = reader.fieldnames or []
+    rows_out: list[dict] = []
+    for r in reader:
+        new = dict(r)
+        for c in header:
+            cl = c.strip().lower()
+            v = new.get(c)
+            if not v:
+                continue
+            if cl in file_cols_lc:
+                # If the cell is a JSON dict (registered file record), pull the id.
+                s = str(v).strip()
+                if s[:1] == "{":
+                    try:
+                        obj = _json.loads(s)
+                        if isinstance(obj, dict) and obj.get("id"):
+                            new[c] = obj["id"]
+                            continue
+                        if isinstance(obj, dict) and obj.get("path"):
+                            new[c] = fstore.absorb_path_or_id(obj["path"], source=source) or v
+                            continue
+                    except ValueError:
+                        pass
+                new[c] = fstore.absorb_path_or_id(s, source=source)
+            elif cl in list_cols_lc:
+                s = str(v).strip()
+                if s[:1] == "[":
+                    new[c] = fstore.absorb_list(s, source=source)
+                else:
+                    new[c] = fstore.absorb_list([s], source=source)
+        rows_out.append(new)
+    out_path = csv_path.with_suffix(".captured.csv")
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csvmod.DictWriter(fh, fieldnames=header)
+        w.writeheader()
+        for r in rows_out:
+            w.writerow(r)
+    return out_path
 
 
 def create_app() -> FastAPI:
@@ -159,7 +210,12 @@ def create_app() -> FastAPI:
     @app.post("/api/runs/{rid}/to-dataset")
     async def run_to_dataset(rid: str, body: dict = Body(...)):
         """Append a finished run's result into a Dataset (new or existing). The
-        canonical way to capture a run's output into the persistent data layer."""
+        canonical way to capture a run's output into the persistent data layer.
+
+        For workflows whose output_contract declares ``file`` / ``file_list``
+        columns, any raw path or dict-record value in those cells is
+        auto-registered into the file store and replaced with the resulting
+        file id BEFORE ingest — so dataset cells always hold a clean opaque id."""
         mgr = get_manager()
         run = mgr.get(rid)
         if not run:
@@ -170,7 +226,16 @@ def create_app() -> FastAPI:
         name = body.get("name") or f"{run['workflowName']} — {rid}"
         from .registry import get_workflow
         wf = get_workflow(run["workflowId"])
-        res = datastore.ingest_csv(path, target_id=body.get("datasetId"), name=name,
+        # File-typed output columns: rewrite path-or-dict values in the CSV →
+        # registered file ids. Working on a temp copy keeps the original
+        # run output.csv untouched (re-captures stay idempotent).
+        ingest_path = path
+        if wf and wf.output_contract:
+            file_cols = [c["name"] for c in wf.output_contract if c.get("type") == "file"]
+            list_cols = [c["name"] for c in wf.output_contract if c.get("type") == "file_list"]
+            if file_cols or list_cols:
+                ingest_path = _absorb_run_files(path, rid, file_cols, list_cols)
+        res = datastore.ingest_csv(ingest_path, target_id=body.get("datasetId"), name=name,
                                    dedup_keys=body.get("dedupKeys"),
                                    source={"kind": "run", "runId": rid, "workflow": run["workflowId"]},
                                    columns=(wf.output_contract if wf else None))
@@ -311,6 +376,106 @@ def create_app() -> FastAPI:
             return JSONResponse({"error": "not found"}, status_code=404)
         safe = (ds["name"] if ds else did).replace("/", "-")
         return FileResponse(str(path), media_type="text/csv", filename=f"{safe}.csv")
+
+    # ---------------------------------------------------------------- files
+    # Static collection routes BEFORE the dynamic /{fid} routes (FastAPI matches in order).
+    @app.get("/api/files")
+    async def files_list(mime: str | None = None, source: str | None = None,
+                         tag: str | None = None, search: str | None = None,
+                         limit: int = 200, offset: int = 0):
+        return fstore.list_files(mime=mime, source=source, tag=tag, search=search,
+                                 limit=limit, offset=offset)
+
+    @app.post("/api/files")
+    async def files_upload(file: UploadFile = File(...),
+                           name: str | None = Form(None),
+                           source: str | None = Form(None),
+                           tags: str | None = Form(None)):
+        """Multipart upload. ``tags`` is an optional JSON array of strings."""
+        try:
+            data = await file.read()
+            tag_list = jsonmod.loads(tags) if tags else None
+            rec = fstore.register_from_bytes(data, name=name or file.filename or "upload",
+                                             mime=file.content_type, source=source or "upload",
+                                             tags=tag_list)
+            return {"file": rec}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.post("/api/files/fetch")
+    async def files_fetch(body: dict = Body(...)):
+        """Plain HTTP fetch (no browser cookies) → register. For session-locked
+        downloads agents should use the browser_fetch MCP tool."""
+        try:
+            rec = fstore.register_from_url(body["url"], name=body.get("name"),
+                                           headers=body.get("headers"),
+                                           source=body.get("source"),
+                                           tags=body.get("tags"))
+            return {"file": rec}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.post("/api/files/from-text")
+    async def files_from_text(body: dict = Body(...)):
+        try:
+            rec = fstore.register_from_text(body["content"], name=body.get("name", "text.txt"),
+                                            mime=body.get("mime", "text/plain"),
+                                            source=body.get("source", "text"),
+                                            tags=body.get("tags"))
+            return {"file": rec}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.get("/api/files/{fid}")
+    async def file_get(fid: str):
+        rec = fstore.get(fid)
+        return {"file": rec} if rec else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.get("/api/files/{fid}/download")
+    async def file_download(fid: str):
+        rec = fstore.get(fid)
+        if not rec:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(rec["path"], media_type=rec["mime"], filename=rec["name"])
+
+    @app.get("/api/files/{fid}/preview")
+    async def file_preview(fid: str):
+        """Inline preview (Content-Disposition: inline) — same bytes, but the
+        browser displays it instead of downloading. Used by the FE thumbnail/
+        modal renderer for images/video/pdf."""
+        rec = fstore.get(fid)
+        if not rec:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(rec["path"], media_type=rec["mime"],
+                            headers={"Content-Disposition": f'inline; filename="{rec["name"]}"'})
+
+    @app.get("/api/files/{fid}/view")
+    async def file_view(fid: str, max_bytes: int = 200_000):
+        """Get text content (for textual MIME types) — used by the preview modal
+        for code/json/csv/text. Non-text files return ``{text: null}``."""
+        rec = fstore.get(fid)
+        if not rec:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return {"file": rec, "text": fstore.view_text(fid, max_bytes=max_bytes),
+                "textual": fstore.is_textual(rec["mime"])}
+
+    @app.post("/api/files/{fid}/rename")
+    async def file_rename(fid: str, body: dict = Body(...)):
+        rec = fstore.rename(fid, body.get("name", ""))
+        return {"file": rec} if rec else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.post("/api/files/{fid}/tags")
+    async def file_tags(fid: str, body: dict = Body(...)):
+        rec = fstore.set_tags(fid, body.get("tags") or [])
+        return {"file": rec} if rec else JSONResponse({"error": "not found"}, status_code=404)
+
+    @app.get("/api/files/{fid}/references")
+    async def file_refs(fid: str):
+        return {"references": fstore.references(fid)}
+
+    @app.delete("/api/files/{fid}")
+    async def file_delete(fid: str, force: bool = False):
+        return fstore.delete(fid, force=force)
 
     # ---------------------------------------------------------------- profiles
     @app.get("/api/profiles")

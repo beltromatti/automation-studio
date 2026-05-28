@@ -215,6 +215,29 @@ WORKFLOWS: list[WorkflowDef] = [
     # half of the people→connect→message pipeline — feed it any dataset with a
     # profile_url column. Connection-gated (never messages non-connections / pending),
     # drives the shadow-DOM compose overlay, and can alternate across several messages.
+    # Generic list-consuming workflow over the file store — extracts metadata from
+    # each file in an input dataset's `image` (file) or `images` (file_list) column.
+    # Pure stdlib; mostly the real test-bed for the file infrastructure (file
+    # column → workflow → output dataset with file echoed + per-row meta).
+    WorkflowDef(
+        id="media-meta",
+        name="Media Metadata",
+        description="Takes a dataset of files and extracts each file's dimensions / mime / size. "
+        "Accepts an 'image' column (file) or an 'images' column (file_list). Output is one row per file "
+        "with the file echoed through plus its metadata — proof that files round-trip cleanly through "
+        "both input and output contracts.",
+        icon="image",
+        module="automations.media_meta",
+        profile="ephemeral",
+        needs_auth=False,
+        params=[],
+        build_argv=lambda p: ["--params-json", json.dumps(p)],
+        input_contract=[{"name": "image", "type": "file"}],
+        output_contract=[{"name": "image", "type": "file"}, {"name": "name", "type": "text"},
+                         {"name": "mime", "type": "text"}, {"name": "size", "type": "number"},
+                         {"name": "width", "type": "number"}, {"name": "height", "type": "number"},
+                         {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
+    ),
     # List-consuming outreach workflow: publish a text POST in each Reddit community.
     # Same shape (and same field semantics: per-row override, alternating fallback,
     # safety cap) as the LinkedIn Messages workflow, so the two feel like one family.
