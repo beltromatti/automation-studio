@@ -825,13 +825,19 @@ def t_browser_upload(a):
         paths, recs = _resolve_file_or_path(a, want_multiple=bool(a.get("multiple")))
     except ValueError as e:
         return {"error": str(e)}
+    if a.get("index") is None and not a.get("selector"):
+        return {"error": "provide `index` (from browser_observe) or `selector` (CSS, pierces shadow DOM)"}
     # Pass original names + mimes alongside the paths so the page sees the
     # human filename (Reddit/LinkedIn etc. show it in the form), not the
     # content-addressed sha256.ext that lives in the store.
     names = [rec.get("name") or "" for rec in recs]
     mimes = [rec.get("mime") or "" for rec in recs]
-    r = _ctrl("POST", "/act", {"action": "upload", "index": int(a["index"]),
-                               "files": paths, "names": names, "mimes": mimes})
+    body = {"action": "upload", "files": paths, "names": names, "mimes": mimes}
+    if a.get("selector"):
+        body["selector"] = a["selector"]
+    if a.get("index") is not None:
+        body["index"] = int(a["index"])
+    r = _ctrl("POST", "/act", body)
     if isinstance(r, dict) and r.get("error"):
         return r
     return {"ok": True, "uploaded": [{"id": rec.get("id"), "name": rec.get("name"),
@@ -1132,11 +1138,11 @@ BROWSER_TOOLS = [
     ("browser_current_url", "Get the current page URL and title.",
      {"type": "object", "properties": {}}, t_browser_current_url),
     # ---- file primitives (the agent's full media/file power on the browser) ---
-    ("browser_upload", "Upload one or more files to a `<input type=file>` element at [index]. Accepts `fileId` (a Studio file in the store) OR `path` (a raw filesystem path), OR `fileIds`/`paths` for multi-file inputs (set multiple=true). Works on hidden file inputs too — you do NOT need browser_file_chooser for the standard `<input>` case.",
-     {"type": "object", "properties": {"index": {"type": "integer"},
+    ("browser_upload", "Upload one or more files to an `<input type=file>` element. Target it with `index` (from browser_observe) OR `selector` (CSS — pierces shadow DOM, use for hidden inputs the snapshot doesn't enumerate, e.g. 'input[type=file][accept*=\"video\"]'). Accepts `fileId` / `path`, or `fileIds`/`paths` for multi-file inputs (set multiple=true). Works on hidden file inputs too — you do NOT need browser_file_chooser for the standard `<input>` case.",
+     {"type": "object", "properties": {"index": {"type": "integer"}, "selector": {"type": "string"},
                                        "fileId": {"type": "string"}, "path": {"type": "string"},
                                        "fileIds": {"type": "array"}, "paths": {"type": "array"},
-                                       "multiple": {"type": "boolean"}}, "required": ["index"]}, t_browser_upload),
+                                       "multiple": {"type": "boolean"}}}, t_browser_upload),
     ("browser_capture_download", "Click the element at [index] AND capture the download it triggers, in one call. The captured file is saved into the Studio file store and the new file record (id, path, name, mime, size) is returned. Use for download links / 'export CSV' buttons / anything click-triggered. timeoutSec defaults to 30.",
      {"type": "object", "properties": {"index": {"type": "integer"}, "name": {"type": "string"},
                                        "timeoutSec": {"type": "number"}}, "required": ["index"]}, t_browser_capture_download),

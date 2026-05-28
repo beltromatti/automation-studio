@@ -1,10 +1,10 @@
-"""Built-in, list-consuming workflow: create a text POST in each Reddit community.
+"""Built-in, list-consuming workflow: create a text or media POST in each Reddit community.
 
 Consumes a dataset of Reddit communities (a ``community`` per row in any common
 format — ``r/learnpython``, ``/r/learnpython``, ``learnpython``, a community URL
 like ``https://www.reddit.com/r/learnpython/``, or any URL whose path contains
 ``/r/<name>``) and, one community at a time, human-paced, opens that community's
-text-submit page and publishes a post.
+submit page and publishes a post.
 
 Message resolution mirrors LinkedIn Messages exactly (so the two feel like one
 family), in priority order:
@@ -27,6 +27,30 @@ human post:
 * Else the first sentence (≤280 chars) is the title and the full message is
   the body — so a longer paragraph stays readable on the feed.
 
+**Media (images & video) — same shape as messages**:
+
+  1. A per-row ``media`` column on the input dataset (``file_list``,
+     personalised per community — overrides everything).
+  2. The ``media`` param (``file_list``): one set of files used for every post
+     that doesn't have its own per-row media.
+
+Crucially media is NEVER round-robined: each post is a complete artefact, and
+"distribute these N files across N posts" is what the dataset is for. Rules
+(determined empirically against the live Reddit UI):
+
+* **Images**: 1 to 20 files, mimes ``image/jpeg|png|webp|gif``. Multi-image
+  becomes a Reddit gallery.
+* **Video**: exactly 1 file, mimes ``video/mp4|quicktime`` (.mp4 / .mov).
+* **Mixed** (any image + any video together) is **rejected** as
+  ``media_invalid`` — Reddit's behaviour with mixed uploads is ambiguous
+  (the video is silently dropped in some flows), so we never publish a
+  partial post.
+* Wrong mime / too many / zero size / file missing on disk → ``media_invalid``,
+  the post is **not** published (all-or-nothing — we don't fall back to a
+  text-only post when media was requested).
+* Upload-stage failure (file_chooser timeout / preview never renders) →
+  ``media_failed``, post **not** published.
+
 Hard-won realities, learned by submitting real posts by hand:
 
 * **Submit page is plain DOM** (no shadow). Title is a ``<textarea>`` with
@@ -34,6 +58,14 @@ Hard-won realities, learned by submitting real posts by hand:
   (contenteditable) with accessible name "Post body text field". Submit is a
   ``<button>`` named "Post", starts ``disabled`` and becomes enabled once a
   title is present (the body can stay empty for a title-only post).
+* **Media uploads ride the visible "Upload files" button via the file-chooser
+  intercept**, NOT the hidden ``<input type=file>`` (Reddit puts five of those
+  in shadow roots with no stable identifier; the one the page's JS actually
+  wires to the visible button isn't always the first one to a selector match).
+  ``sess.file_chooser(index, files, names=..., mimes=...)`` clicks the Upload
+  button while ``page.expect_file_chooser()`` is open, then provides the
+  files. Reddit renders ``blob:`` previews — we poll for the right preview
+  count before considering the upload landed.
 * **Success signal is a URL transition.** After Send, Reddit navigates AWAY
   from ``/submit/`` — typically straight to the new post at
   ``/r/<community>/comments/<id>/<slug>/``, from which we return ``post_url``.
@@ -50,6 +82,9 @@ Hard-won realities, learned by submitting real posts by hand:
   filling title + body. When that happens we report ``needs_flair`` (instead
   of clicking a disabled button) so the user knows this row needs manual flair
   picking.
+* **Community refuses media** (text-only sub: the Images & Video tab is
+  ``disabled`` on its submit form) → we report ``not_postable_media`` and
+  don't fall back to text.
 * **Rate limit / forbidden** → Reddit shows inline text after the click
   ("you are doing that too much…", "you don't have permission…"). We catch
   the common patterns and either stop the run (``rate_limited``) or mark the
@@ -73,7 +108,15 @@ from automations import userkit
 COMMUNITY_RE = re.compile(r"(?:^|/)r/([A-Za-z0-9][A-Za-z0-9_]{2,20})(?=/|$|\?|#)", re.I)
 BARE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]{2,20}$")
 
-SUBMIT_URL = "https://www.reddit.com/r/{}/submit/?type=TEXT"
+SUBMIT_URL_TEXT  = "https://www.reddit.com/r/{}/submit/?type=TEXT"
+SUBMIT_URL_MEDIA = "https://www.reddit.com/r/{}/submit/?type=IMAGE"
+
+# Media rules (verified against the live submit form's hidden <input> accept lists
+# + the gallery / single-video constraints the UI enforces).
+IMAGE_MIMES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
+VIDEO_MIMES = {"video/mp4", "video/quicktime"}
+MAX_IMAGES_PER_POST = 20
+MAX_VIDEOS_PER_POST = 1
 
 # Where the post lives after a successful submit. Two shapes — a regular sub
 # (``/r/<sub>/comments/<id>/<slug>/``) or the user's personal sub
@@ -188,6 +231,84 @@ def _row_message(row: dict) -> str:
     return ""
 
 
+def _resolve_media(params: dict, row: dict) -> list[dict]:
+    """Resolve the media files for this post: per-row ``media`` column on the
+    input dataset (already expanded to dicts by the orchestrator) wins; else the
+    workflow ``media`` param (a list of file records from the registry). Returns
+    a list of file dicts each carrying ``path``/``name``/``mime``. The empty
+    list means "no media — text post"."""
+    files = userkit.input_files(row, "media") or userkit.input_files(row, "files")
+    if files:
+        return files
+    single = userkit.input_file(row, "media")
+    if single:
+        return [single]
+    raw = params.get("media")
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [m for m in raw if isinstance(m, dict) and m.get("path")]
+    if isinstance(raw, dict) and raw.get("path"):
+        return [raw]
+    # The orchestrator expands param-file values for us; if the agent passed a
+    # bare id/array, resolve via the file store directly.
+    try:
+        from orchestrator import files as _files
+    except ImportError:
+        return []
+    out: list[dict] = []
+    items = raw if isinstance(raw, list) else [raw]
+    for it in items:
+        if isinstance(it, str):
+            try:
+                items_parsed = json.loads(it) if it.strip().startswith("[") else [it]
+            except ValueError:
+                items_parsed = [it]
+            for ii in items_parsed:
+                rec = _files.get(str(ii).strip()) if str(ii).strip() else None
+                if rec:
+                    out.append(rec)
+    return out
+
+
+def _classify_media(files: list[dict]) -> tuple[str, str]:
+    """Validate ``files`` against Reddit's gallery / single-video / no-mixed
+    rules. Returns ``(kind, error)`` where ``kind`` is one of ``""`` (no media
+    — text post), ``"images"`` (1..20 images), ``"video"`` (exactly one video),
+    and ``error`` is non-empty when the set is invalid."""
+    if not files:
+        return "", ""
+    imgs, videos, bad = [], [], []
+    for f in files:
+        m = (f.get("mime") or "").lower()
+        if m in IMAGE_MIMES:
+            imgs.append(f)
+        elif m in VIDEO_MIMES:
+            videos.append(f)
+        else:
+            bad.append(f.get("name") or f.get("id") or "?")
+    if bad:
+        return "", (f"unsupported mime: {bad[:3]} (Reddit accepts "
+                    f"jpeg/png/webp/gif images and mp4/mov videos)")
+    if imgs and videos:
+        return "", "mixed images + video not supported (Reddit drops the video in mixed posts)"
+    if videos:
+        if len(videos) > MAX_VIDEOS_PER_POST:
+            return "", f"too many videos: {len(videos)} (Reddit allows {MAX_VIDEOS_PER_POST} per post)"
+        return "video", ""
+    if len(imgs) > MAX_IMAGES_PER_POST:
+        return "", f"too many images: {len(imgs)} (Reddit gallery cap is {MAX_IMAGES_PER_POST})"
+    # check files actually exist on disk + are non-empty (the upload step needs them)
+    import os as _os
+    for f in imgs:
+        p = f.get("path") or ""
+        if not p or not _os.path.isfile(p):
+            return "", f"missing file on disk: {f.get('name') or p}"
+        if _os.path.getsize(p) == 0:
+            return "", f"empty file: {f.get('name') or p}"
+    return "images", ""
+
+
 def _title_body(msg: str) -> tuple[str, str]:
     """Split a free-form message into (title, body) the way a human would post.
 
@@ -294,16 +415,21 @@ def _name(n) -> str:
 
 
 def _find_form(nodes: list) -> dict:
-    """Identify the three submit-form controls by their accessible-name shape
-    (which is stable across communities; observe gives us the label as ``name``).
+    """Identify the submit-form controls by their accessible-name shape
+    (stable across communities; observe gives us the label as ``name``).
 
     * Title — a ``<textarea>`` whose name is "title" (the form label).
-    * Body  — a ``<div role="textbox">`` whose name is "Post body text field".
+    * Body  — a ``<div role="textbox">`` whose name contains "post body"
+      (label is "Post body text field" on Text and Images & Video forms).
     * Post  — a ``<button>`` whose name is exactly "Post" (rejects "Save Draft"
       and the per-tool toolbar buttons).
+    * Upload — a ``<button>`` named "Upload files" (only present on the
+      ``?type=IMAGE`` form when the community supports media).
+    * Image tab / image tab disabled — the "Images & Video" role=tab button,
+      with a flag for whether it's disabled (text-only sub).
 
-    Returns dict of {title, body, post} (any value may be None if not yet
-    rendered)."""
+    Returns dict of {title, body, post, upload, image_tab, image_tab_disabled}
+    (any value may be None if not yet rendered)."""
     title = next((n for n in nodes if n.get("tag") == "textarea"
                   and _name(n).lower() == "title"), None)
     body = next((n for n in nodes if n.get("tag") == "div"
@@ -311,7 +437,80 @@ def _find_form(nodes: list) -> dict:
                  and "post body" in _name(n).lower()), None)
     post = next((n for n in nodes if n.get("tag") == "button"
                  and _name(n).lower() == "post"), None)
-    return {"title": title, "body": body, "post": post}
+    upload = next((n for n in nodes if n.get("tag") == "button"
+                   and _name(n).lower() == "upload files"), None)
+    image_tab = next((n for n in nodes if n.get("tag") == "button"
+                      and _attrs(n).get("role") == "tab"
+                      and "image" in _name(n).lower()), None)
+    image_tab_disabled = bool(image_tab and _is_disabled(image_tab))
+    return {"title": title, "body": body, "post": post, "upload": upload,
+            "image_tab": image_tab, "image_tab_disabled": image_tab_disabled}
+
+
+async def _media_preview_count(sess) -> int:
+    """How many media previews has Reddit's upload pipeline already rendered?
+    Each uploaded image becomes a ``blob:`` <img>, each video becomes a <video>
+    with a blob: poster. Walking shadow roots is essential — the preview tiles
+    live inside Reddit's design-system shadow DOM. Used to wait for an upload
+    to LAND before clicking Post."""
+    js = r"""() => {
+      const seen = new Set(); let videos = 0;
+      function walk(root) {
+        for (const img of root.querySelectorAll('img')) {
+          const s = img.src || ''; if (s.startsWith('blob:')) seen.add(s);
+        }
+        videos += root.querySelectorAll('video').length;
+        for (const el of root.querySelectorAll('*')) if (el.shadowRoot) walk(el.shadowRoot);
+      }
+      walk(document);
+      return { imgs: seen.size, videos };
+    }"""
+    try:
+        d = await sess.evaluate(js)
+        return int((d or {}).get("imgs", 0)) + int((d or {}).get("videos", 0))
+    except Exception:
+        return 0
+
+
+async def _upload_media(sess, media: list[dict], kind: str) -> tuple[bool, str]:
+    """Upload ``media`` (already validated by ``_classify_media``) via the
+    visible "Upload files" button + file-chooser intercept. Polls for the
+    ``blob:`` previews to land before returning. Returns ``(ok, detail)``."""
+    # Poll for the Upload files button to render (the Images & Video tab can
+    # take a beat to hydrate after navigation).
+    upload_btn = None
+    for _ in range(20):  # ~10s
+        nodes = await _nodes(sess)
+        form = _find_form(nodes)
+        if form["upload"]:
+            upload_btn = form["upload"]; break
+        await sess.sleep(500)
+    if not upload_btn:
+        return False, "Upload files button never rendered (community may refuse media)"
+
+    paths = [m["path"] for m in media]
+    names = [m.get("name") or "" for m in media]
+    mimes = [m.get("mime") or "" for m in media]
+    try:
+        await sess.file_chooser(int(upload_btn["index"]), paths,
+                                names=names, mimes=mimes, timeout_ms=15_000)
+    except Exception as e:
+        return False, f"file chooser failed: {str(e)[:120]}"
+
+    # Wait for the previews to land — exact count for images, ≥1 for video.
+    want = len(media)
+    deadline_polls = 30  # ~15s for the slowest uploads (small files; bigger may need more)
+    for _ in range(deadline_polls):
+        await sess.sleep(500)
+        seen = await _media_preview_count(sess)
+        if seen >= want:
+            return True, ""
+        # Detect Reddit's inline rejection on bad upload (e.g. unsupported file
+        # the server refused after the client passed it through).
+        p = await _page(sess)
+        if p.get("ratelimit"):
+            return False, "Reddit ratelimit during upload"
+    return False, f"only {await _media_preview_count(sess)}/{want} preview(s) appeared after upload"
 
 
 def _extract_post_url(p: dict) -> str:
@@ -332,10 +531,14 @@ def _extract_post_url(p: dict) -> str:
 
 
 # ---- post to one community ---------------------------------------------------
-async def process_community(sess, community: str, message: str) -> tuple[str, str, str]:
-    """Open the submit page for ``community`` and publish ``message`` as a
-    text post. Returns (status, post_url, detail)."""
-    target = SUBMIT_URL.format(community)
+async def process_community(sess, community: str, message: str,
+                            media: list[dict] | None = None) -> tuple[str, str, str]:
+    """Open the submit page for ``community`` and publish ``message`` (plus
+    optional ``media`` — a list of validated file records) as a post.
+    Returns (status, post_url, detail). All-or-nothing: when media is supplied
+    we never fall back to a text-only post if the media flow can't complete."""
+    media = media or []
+    target = (SUBMIT_URL_MEDIA if media else SUBMIT_URL_TEXT).format(community)
     try:
         await sess.goto(target)
     except Exception as e:
@@ -383,14 +586,33 @@ async def process_community(sess, community: str, message: str) -> tuple[str, st
             return "not_postable", "", "Reddit refused access to the submit form"
         return "unavailable", "", "submit form did not render"
 
+    # Media path: confirm the Images & Video tab is selectable (text-only subs
+    # render it disabled). Then upload the files BEFORE typing the title — the
+    # Post button needs both title AND a landed upload to enable, so this order
+    # gives the user no false-positive on a media-required post that lost its
+    # media silently.
+    if media:
+        if form.get("image_tab_disabled"):
+            return ("not_postable_media", "",
+                    "community doesn't accept media posts (Images & Video tab is disabled)")
+        if not form.get("upload"):
+            return ("not_postable_media", "", "Upload files button not found on this form")
+        ok, err = await _upload_media(sess, media, "video" if media[0].get("mime", "").startswith("video") else "images")
+        if not ok:
+            return "media_failed", "", err
+
     title, body = _title_body(message)
     try:
+        # Re-resolve form after upload — adding media re-renders the form.
+        nodes = await _nodes(sess)
+        form = _find_form(nodes)
+        if not form.get("title"):
+            return "post_failed", "", "title textarea vanished after media upload"
         await sess.type(int(form["title"]["index"]), title, clear=True)
         await sess.sleep(random.randint(250, 500))
         # body is OPTIONAL — only type into it when we actually have body text
         # AND the body textbox rendered. A short title-only post stays clean.
         if body:
-            # re-resolve in case typing the title shifted indices / hydrated UI
             nodes = await _nodes(sess)
             form = _find_form(nodes)
             if form["body"] is not None:
@@ -508,8 +730,25 @@ async def run(params, sess, inputs):
             userkit.progress(i, total, message=f"{i}/{total} (no message)")
             continue
 
+        # Media resolution + validation: per-row 'media' column wins, else the
+        # workflow 'media' param. We validate BEFORE driving the browser so the
+        # invalid case never sends a half-formed post.
         try:
-            status, post_url, detail = await process_community(sess, community, message)
+            media = _resolve_media(params, row)
+        except Exception as e:
+            media = []
+            userkit.log(f"[reddit] r/{community} media resolve error: {e}")
+        kind, media_err = _classify_media(media)
+        if media_err:
+            out.append({"community": community, "post_url": "", "status": "media_invalid",
+                        "detail": media_err})
+            userkit.progress(i, total, message=f"{i}/{total} r/{display} → media_invalid")
+            if i < total:
+                await asyncio.sleep(random.uniform(2.0, 4.0))
+            continue
+
+        try:
+            status, post_url, detail = await process_community(sess, community, message, media=media)
         except Exception as e:
             status, post_url, detail = "error", "", str(e)[:160]
             userkit.log(f"[reddit] r/{community} error: {e}")

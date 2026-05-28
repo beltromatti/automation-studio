@@ -307,9 +307,17 @@ class HumanBrowser:
         return await self._require_page().evaluate("() => document.body.innerText")
 
     # ------------------------------------------------------------------ files
-    async def upload(self, index: int, files: list, *, names: list | None = None,
-                     mimes: list | None = None) -> dict:
-        """Upload one or more local files to an `<input type=file>` at ``index``.
+    async def upload(self, files: list, *, index: int | None = None,
+                     selector: str | None = None,
+                     names: list | None = None, mimes: list | None = None) -> dict:
+        """Upload one or more local files to an `<input type=file>`.
+
+        Target the input EITHER by ``index`` (resolved from observe — works for
+        inputs the snapshot saw) OR by ``selector`` (a CSS selector; Playwright
+        pierces shadow DOM by default, so this reaches inputs our observe
+        doesn't enumerate — e.g. Reddit's hidden upload <input> living in a
+        shadow root). With a selector, the FIRST matching input is used.
+
         Works even when the input is hidden (the common pattern where a styled
         button triggers the real `<input>`) — ``set_input_files`` calls the CDP
         method directly and doesn't gate on visibility.
@@ -321,7 +329,12 @@ class HumanBrowser:
         raw path (fine for raw-path uploads where there's no original name)."""
         if not files:
             raise ActionError("upload: provide at least one file path")
-        loc = await self._resolve(index)
+        if selector:
+            loc = self._require_page().locator(selector).first
+        elif index is not None:
+            loc = await self._resolve(int(index))
+        else:
+            raise ActionError("upload: provide either `index` or `selector`")
         names = names or []
         mimes = mimes or []
         payloads: list[Any] = []
@@ -484,7 +497,9 @@ class HumanBrowser:
             return await self.wait_for(state=kw.get("state", "networkidle"), timeout=int(kw.get("timeout", 15000)))
         # files (the MCP server passes file ids → paths before reaching us)
         if action == "upload":
-            return await self.upload(int(kw["index"]), list(kw.get("files") or []),
+            return await self.upload(list(kw.get("files") or []),
+                                     index=(int(kw["index"]) if kw.get("index") is not None else None),
+                                     selector=kw.get("selector"),
                                      names=list(kw.get("names") or []),
                                      mimes=list(kw.get("mimes") or []))
         if action == "download_click":

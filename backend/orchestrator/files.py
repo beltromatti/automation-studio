@@ -254,7 +254,10 @@ def register_from_bytes(data: bytes, *, name: str, mime: str | None = None,
     tmp = files_dir() / f".tmp-{uuid.uuid4().hex}"
     try:
         tmp.write_bytes(data)
-        if mime:
+        # `application/octet-stream` is the universal "I don't know" mime curl/
+        # browsers default to when they have nothing better — treat it as no
+        # hint at all and let magic-byte sniffing detect the real mime.
+        if mime and mime.lower().strip() != "application/octet-stream":
             ext = (mimetypes.guess_extension(mime) or Path(name).suffix or ".bin").lstrip(".")
         else:
             mime, ext = _detect(tmp, hint_name=name)

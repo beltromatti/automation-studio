@@ -75,6 +75,27 @@ class LocalSession:
     async def screenshot(self, path: str | None = None) -> str:
         return await self.hb.screenshot(path)
 
+    async def upload(self, files: list, *, index: int | None = None,
+                     selector: str | None = None, names: list | None = None,
+                     mimes: list | None = None) -> dict:
+        return await self.hb.upload(list(files), index=index, selector=selector,
+                                    names=names, mimes=mimes)
+
+    async def file_chooser(self, index: int, files: list, *, names: list | None = None,
+                           mimes: list | None = None, timeout_ms: int = 15_000) -> dict:
+        return await self.hb.file_chooser(int(index), list(files), names=names,
+                                          mimes=mimes, timeout_ms=timeout_ms)
+
+    async def download_click(self, index: int, *, timeout_ms: int = 30_000) -> dict:
+        return await self.hb.download_click(int(index), timeout_ms=timeout_ms)
+
+    async def expect_download(self, timeout_ms: int = 30_000) -> dict:
+        return await self.hb.expect_download(timeout_ms=timeout_ms)
+
+    async def fetch(self, url: str, *, headers: dict | None = None,
+                    timeout_ms: int = 30_000) -> dict:
+        return await self.hb.fetch(url, headers=headers, timeout_ms=timeout_ms)
+
 
 class RemoteSession:
     """Attaches to a running control server (humanbrowser.server)."""
@@ -155,6 +176,39 @@ class RemoteSession:
 
     async def screenshot(self, path: str | None = None) -> str:
         return (await self._get("/screenshot")).get("path", "")
+
+    # ---- files: same surface as LocalSession, dispatched over /act ----------
+    async def upload(self, files: list, *, index: int | None = None,
+                     selector: str | None = None, names: list | None = None,
+                     mimes: list | None = None) -> dict:
+        body: dict[str, Any] = {"action": "upload", "files": list(files),
+                                "names": names or [], "mimes": mimes or []}
+        if index is not None:
+            body["index"] = int(index)
+        if selector:
+            body["selector"] = selector
+        return (await self._post("/act", body)).get("result") or {}
+
+    async def file_chooser(self, index: int, files: list, *, names: list | None = None,
+                           mimes: list | None = None, timeout_ms: int = 15_000) -> dict:
+        return (await self._post("/act", {"action": "file_chooser", "index": int(index),
+                                          "files": list(files), "names": names or [],
+                                          "mimes": mimes or [],
+                                          "timeout_ms": int(timeout_ms)})).get("result") or {}
+
+    async def download_click(self, index: int, *, timeout_ms: int = 30_000) -> dict:
+        return (await self._post("/act", {"action": "download_click", "index": int(index),
+                                          "timeout_ms": int(timeout_ms)})).get("result") or {}
+
+    async def expect_download(self, timeout_ms: int = 30_000) -> dict:
+        return (await self._post("/act", {"action": "expect_download",
+                                          "timeout_ms": int(timeout_ms)})).get("result") or {}
+
+    async def fetch(self, url: str, *, headers: dict | None = None,
+                    timeout_ms: int = 30_000) -> dict:
+        return (await self._post("/act", {"action": "fetch", "url": url,
+                                          "headers": headers or {},
+                                          "timeout_ms": int(timeout_ms)})).get("result") or {}
 
 
 def open_session(*, headless: bool = True, humanize: bool = True,
