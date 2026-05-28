@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
@@ -266,18 +267,39 @@ function ColumnHeader({ col, sort, dir, isKey, open, onToggleMenu, onSort, onRen
   col: DatasetColumn; sort: string | null; dir: "asc" | "desc"; isKey: boolean; open: boolean;
   onToggleMenu: () => void; onSort: () => void; onRename: () => void; onDrop: () => void; onToggleKey: () => void;
 }) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // Portal-rendered + anchored to the trigger's rect so the menu escapes the
+  // table's overflow:auto wrapper (otherwise it gets clipped at the table
+  // edge). Re-positions on scroll/resize, closes on Escape (click-outside is
+  // handled by the parent's `menuCol` state via the trigger button toggle).
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const reposition = () => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const MENU_W = 170;
+    setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(window.innerWidth - MENU_W - 8, r.right - MENU_W)) });
+  };
+  useLayoutEffect(() => {
+    if (!open) return;
+    reposition();
+    const f = () => reposition();
+    window.addEventListener("scroll", f, true);
+    window.addEventListener("resize", f);
+    return () => { window.removeEventListener("scroll", f, true); window.removeEventListener("resize", f); };
+  }, [open]);
   return (
-    <th className="text-left font-medium text-muted px-3 py-2.5 whitespace-nowrap border-b select-none relative" style={{ borderColor: "var(--color-line)" }}>
+    <th className="text-left font-medium text-muted px-3 py-2.5 whitespace-nowrap border-b select-none" style={{ borderColor: "var(--color-line)" }}>
       <div className="flex items-center gap-1.5">
         <span className="cursor-pointer hover:text-fg" onClick={onSort}>
           {col.display} {sort === col.display && (dir === "asc" ? "↑" : "↓")}
         </span>
         {isKey && <Icon name="key" size={11} />}
         <span className="text-[9px] text-faint mono">{col.type[0]}</span>
-        <button className="ml-auto text-faint hover:text-fg" onClick={onToggleMenu}>⋯</button>
+        <button ref={triggerRef} className="ml-auto text-faint hover:text-fg" onClick={onToggleMenu}>⋯</button>
       </div>
-      {open && (
-        <div className="absolute right-2 top-9 z-30 card p-1 text-[12px] font-normal" style={{ background: "#161616", minWidth: 150 }}>
+      {open && pos && createPortal(
+        <div className="fixed z-50 card p-1 text-[12px] font-normal"
+             style={{ background: "#161616", minWidth: 170, top: pos.top, left: pos.left }}>
           <button className="w-full text-left px-2.5 py-1.5 rounded hover:bg-elevated flex items-center gap-2" onClick={onToggleKey}>
             <Icon name="key" size={13} /> {isKey ? "Remove dedup key" : "Use as dedup key"}
           </button>
@@ -287,7 +309,8 @@ function ColumnHeader({ col, sort, dir, isKey, open, onToggleMenu, onSort, onRen
           <button className="w-full text-left px-2.5 py-1.5 rounded hover:bg-elevated text-danger flex items-center gap-2" onClick={onDrop}>
             <Icon name="trash" size={13} /> Drop column
           </button>
-        </div>
+        </div>,
+        document.body
       )}
     </th>
   );

@@ -8,7 +8,8 @@
 // (files attached at launch) and AgentSessionPage (files attached to a steer).
 // All three sites talk to the same /api/files endpoints + share the same
 // rendering for thumbnails + selection chips.
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "./Icon";
 import { FileThumb } from "./FilePreview";
 import { jget, jpostForm } from "@/lib/client";
@@ -126,23 +127,73 @@ export function FilePickerInput(props: FilePickerProps) {
 // reveals a small floating panel. Returns the same multi shape (JSON array
 // string in `value`). Renders selected chips inline so the user always sees
 // what's attached even when the panel is closed.
+//
+// The panel renders via createPortal so it escapes any overflow:auto/hidden
+// ancestor (the AgentSessionPage's flex layout could in some states clip a
+// regular `absolute` popover). Anchored to the trigger's bounding rect, opens
+// UPWARD when the trigger is in the bottom half of the viewport.
 export function FileAttachPopover({ value, onChange }: { value: string; onChange: (ids: string) => void }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; left: number } | null>(null);
   const selectedIds = (() => {
     try { const j = JSON.parse(value); return Array.isArray(j) ? j.map(String) : []; } catch { return []; }
   })();
+
+  const reposition = () => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const PANEL_W = 384; // w-96
+    const left = Math.max(8, Math.min(window.innerWidth - PANEL_W - 8, r.right - PANEL_W));
+    // Open upward if the trigger is in the bottom half (chat input usually is).
+    const upward = r.top > window.innerHeight / 2;
+    setPos(upward
+      ? { bottom: window.innerHeight - r.top + 4, left }
+      : { top: r.bottom + 4, left });
+  };
+  useLayoutEffect(() => {
+    if (!open) return;
+    reposition();
+    const onScroll = () => reposition();
+    const onResize = () => reposition();
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (panelRef.current?.contains(t) || triggerRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
   return (
-    <div className="relative">
-      <button type="button" onClick={() => setOpen((v) => !v)}
+    <>
+      <button ref={triggerRef} type="button" onClick={() => setOpen((v) => !v)}
               title={`Attach files (${selectedIds.length} selected)`}
               className="p-1.5 rounded hover:bg-[#1a1a1a] inline-flex items-center gap-1"
               style={{ color: selectedIds.length ? "#3b9eff" : "var(--color-muted)" }}>
         <Icon name="paperclip" size={15} />
         {selectedIds.length > 0 && <span className="text-[11px]">{selectedIds.length}</span>}
       </button>
-      {open && (
-        <div className="absolute bottom-full mb-2 right-0 w-96 z-30 rounded-lg shadow-2xl bg-panel border"
-             style={{ borderColor: "var(--color-line)" }}>
+      {open && pos && createPortal(
+        <div ref={panelRef}
+             className="fixed w-96 z-50 rounded-lg shadow-2xl bg-panel border"
+             style={{ borderColor: "var(--color-line)",
+                      top: pos.top, bottom: pos.bottom, left: pos.left }}>
           <div className="px-3 py-2 border-b text-[12px] flex items-center justify-between"
                style={{ borderColor: "var(--color-line)" }}>
             <span className="font-medium">Attach files</span>
@@ -153,8 +204,9 @@ export function FileAttachPopover({ value, onChange }: { value: string; onChange
           <div className="p-2">
             <FilePickerInput multiple value={value} onChange={onChange} compact />
           </div>
-        </div>
+        </div>,
+        document.body
       )}
-    </div>
+    </>
   );
 }

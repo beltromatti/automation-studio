@@ -2,7 +2,8 @@
 // pickers, plus a modal that opens the full preview (image, video, audio, text
 // or a generic file with a download link). Single source of truth for "how do
 // we render a Studio file in the UI"; every place files appear delegates here.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "./Icon";
 import { FilePickerInput } from "./FilePickerInput";
 import { fileUrl, jget, jpost, jpostForm, formatBytes } from "@/lib/client";
@@ -181,6 +182,12 @@ export function FileCellEditor({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Popover floats at this viewport position, anchored to the trigger's rect.
+  // Recomputed on open, on window resize, and on any ancestor scroll — so the
+  // cell editor stays under its cell as the data table scrolls.
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
   function normalize(v: unknown, list: boolean): string {
     if (list) {
@@ -193,6 +200,51 @@ export function FileCellEditor({
   // Re-seed the draft each time the panel opens so we always start from the
   // cell's current truth (the parent may have re-fetched in between).
   useEffect(() => { if (open) setDraft(normalize(value, multiple)); }, [open, value, multiple]);
+
+  // Anchor the (portal-rendered) panel to the trigger's bounding rect. Using
+  // a portal means the panel escapes any overflow:auto/hidden ancestor (the
+  // dataset table wraps its tbody in a scroll container, so plain `absolute`
+  // got clipped); a fixed-rect anchor keeps it visually pinned to the cell.
+  const reposition = () => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const PANEL_W = 420;
+    const left = Math.max(8, Math.min(window.innerWidth - PANEL_W - 8, r.left));
+    // Prefer below the trigger; flip above when the bottom would clip.
+    const wantTop = r.bottom + 4;
+    setPos({ top: wantTop, left });
+  };
+  useLayoutEffect(() => {
+    if (!open) return;
+    reposition();
+    const onScroll = () => reposition();
+    const onResize = () => reposition();
+    // capture=true so we catch scrolls inside any ancestor scroll container.
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [open]);
+
+  // Click-outside + Escape to close. Click-outside is bound on mousedown so a
+  // click on a button inside the panel doesn't race the open/close state.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (panelRef.current?.contains(t) || triggerRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
   const save = async (newValue: string) => {
     setBusy(true); setErr("");
@@ -232,11 +284,10 @@ export function FileCellEditor({
   const empty = multiple ? ids.length === 0 : !singleId;
 
   return (
-    <div className="relative"
-         onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); setDragOver(true); } }}
+    <div onDragOver={(e) => { if (e.dataTransfer?.types?.includes("Files")) { e.preventDefault(); setDragOver(true); } }}
          onDragLeave={() => setDragOver(false)}
          onDrop={onDrop}>
-      <button type="button" onClick={() => setOpen((v) => !v)}
+      <button ref={triggerRef} type="button" onClick={() => setOpen((v) => !v)}
               className="w-full text-left px-1.5 py-1 rounded hover:bg-[#1a1a1a] transition-colors"
               style={{ outline: dragOver ? "1.5px dashed #3b9eff" : "none", outlineOffset: -2 }}>
         {multiple
@@ -245,9 +296,11 @@ export function FileCellEditor({
               ? <FileChip id={singleId} />
               : <span className="text-faint text-[11.5px]">— click or drop a file —</span>)}
       </button>
-      {open && (
-        <div className="absolute top-full left-0 mt-1 w-105 z-30 rounded-lg shadow-2xl bg-panel border"
-             style={{ borderColor: "var(--color-line)" }} onClick={(e) => e.stopPropagation()}>
+      {open && pos && createPortal(
+        <div ref={panelRef}
+             className="fixed w-105 z-50 rounded-lg shadow-2xl bg-panel border"
+             style={{ borderColor: "var(--color-line)", top: pos.top, left: pos.left }}
+             onClick={(e) => e.stopPropagation()}>
           <div className="px-3 py-2 border-b flex items-center justify-between text-[12px]"
                style={{ borderColor: "var(--color-line)" }}>
             <span className="font-medium">{multiple ? "Edit attachments" : "Set file"}</span>
@@ -274,7 +327,8 @@ export function FileCellEditor({
           {dragOver && (
             <div className="px-3 py-1.5 text-[11.5px] text-running">drop file(s) here to upload + attach</div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
