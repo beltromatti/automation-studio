@@ -215,6 +215,48 @@ WORKFLOWS: list[WorkflowDef] = [
     # half of the people→connect→message pipeline — feed it any dataset with a
     # profile_url column. Connection-gated (never messages non-connections / pending),
     # drives the shadow-DOM compose overlay, and can alternate across several messages.
+    # List-consuming outreach workflow: publish a text POST in each Reddit community.
+    # Same shape (and same field semantics: per-row override, alternating fallback,
+    # safety cap) as the LinkedIn Messages workflow, so the two feel like one family.
+    WorkflowDef(
+        id="reddit-posts",
+        name="Reddit Posts",
+        description="Takes a list of Reddit communities and publishes a text post in each one, one "
+        "community at a time and human-paced. Accepts communities in any common format (r/learnpython, "
+        "/r/learnpython, learnpython, or any URL containing /r/<name>). The message becomes the post "
+        "title + body (short single-line messages become title-only posts; longer ones use the first "
+        "sentence as title; an explicit blank-line break splits title from body). The message can be "
+        "personalized per community via a 'message' column in the input, or set once (with optional "
+        "variants to alternate). Output is the input list with a post_url and status column. Uses your "
+        "logged-in Reddit profile (the bundled default is the 'second' profile).",
+        icon="send",
+        module="automations.reddit_posts",
+        profile="shared",
+        profile_name="c9c42d740f",
+        needs_auth=True,
+        params=[
+            WorkflowParam("message", "Message", "string",
+                          placeholder="Ciao! Sono uno studente del Politecnico di Milano…",
+                          help="The post for each community. The title is auto-derived (the first "
+                               "sentence, or the whole message if short); the body is the full message. "
+                               "Use a blank line (\\n\\n) to force an explicit title/body split. "
+                               "Overridden per-community by a 'message' column in the input dataset, "
+                               "if present."),
+            WorkflowParam("messages", "Messages to alternate", "string", default="",
+                          help="Optional. Several messages to rotate through (round-robin across the "
+                               "posts actually published) — separate them with || (or paste a JSON "
+                               "array). When set, this overrides the single Message above (but a per-row "
+                               "'message' column still wins)."),
+            WorkflowParam("maxPosts", "Max posts this run", "number", default=0,
+                          help="Safety cap on how many posts to actually publish (0 = no cap). "
+                               "Invalid / not-found / restricted / flair-required communities don't count."),
+        ],
+        build_argv=lambda p: ["--params-json", json.dumps(p)],
+        # a per-row `message` column personalises the post (optional); community is required
+        input_contract=[{"name": "community", "type": "text"}, {"name": "message", "type": "text"}],
+        output_contract=[{"name": "community", "type": "text"}, {"name": "post_url", "type": "text"},
+                         {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
+    ),
     WorkflowDef(
         id="linkedin-messages",
         name="LinkedIn Messages",

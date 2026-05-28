@@ -18,9 +18,12 @@ export function RunForm({ workflow }: { workflow: PublicWorkflow }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  // Workflows that use a login default to the profile they were built around (id
-  // "default" today); everything else starts on the throwaway Ephemeral profile.
-  const [profileId, setProfileId] = useState<string>(workflow.needsAuth ? "default" : "ephemeral");
+  // Workflows that use a login default to the profile they were built around (the
+  // workflow's declared `profileName`, falling back to "default" for any older auth
+  // workflow without one); everything else starts on the throwaway Ephemeral profile.
+  const [profileId, setProfileId] = useState<string>(
+    workflow.profileName || (workflow.needsAuth ? "default" : "ephemeral"),
+  );
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [dest, setDest] = useState<string>(""); // "" none | dataset id | "__new__"
   const [newDsName, setNewDsName] = useState(`${workflow.name} results`);
