@@ -109,10 +109,25 @@ export default function AgentSessionPage() {
       es.onmessage = (msg) => {
         try {
           const ev: AgentEvent = JSON.parse(msg.data);
-          setEvents((arr) => [...arr, ev]);
+          setEvents((arr) => {
+            // dedupe by id (per-token streaming: the same id arrives many times
+            // as the text accumulates, then once more as the final/canonical event;
+            // each update REPLACES the prior entry in place, so the UI text grows
+            // smoothly chunk-by-chunk instead of stacking duplicate messages).
+            const id = (ev as { id?: string }).id;
+            if (id) {
+              const i = arr.findIndex((e: AgentEvent) => (e as { id?: string }).id === id);
+              if (i >= 0) {
+                const next = arr.slice();
+                next[i] = ev;
+                return next;
+              }
+            }
+            return [...arr, ev];
+          });
           // status events: keep `s` in sync so the bar/labels update live
-          if (ev.kind === "status" && (ev as any).status) {
-            setS((curr) => (curr ? { ...curr, status: (ev as any).status } : curr));
+          if (ev.kind === "status" && (ev as { status?: string }).status) {
+            setS((curr) => (curr ? { ...curr, status: (ev as { status?: string }).status as string } : curr));
           }
         } catch {}
       };

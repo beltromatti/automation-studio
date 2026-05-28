@@ -153,16 +153,35 @@ def _norm_codex(obj: dict) -> list[dict]:
 
 
 def _norm_claude(obj: dict) -> list[dict]:
-    """Claude `-p --output-format stream-json` → normalised events."""
+    """Claude `-p --output-format stream-json [--include-partial-messages]` → normalised events.
+
+    With --include-partial-messages, Claude emits `stream_event` lines with per-token
+    `content_block_delta` events whose `delta.type == "text_delta"` carries the next
+    text chunk. We surface those as an INTERNAL `_text_delta` event with the block
+    `idx` and the chunk — _run_turn accumulates them per-block, emitting an id-stable
+    `message` event with `partial: True` that the UI replaces in place. The canonical
+    `assistant` event arrives at block completion with the full text; we tag each text
+    block with `_block_idx` so _run_turn can attach the SAME id, replacing the partial
+    with the final (the only one we persist)."""
     t = obj.get("type")
     out: list[dict] = []
     if t == "system" and obj.get("subtype") == "init":
         out.append({"kind": "system", "text": f"session started ({obj.get('model','')})",
                     "threadId": obj.get("session_id")})
+    elif t == "stream_event":
+        ev = obj.get("event") or {}
+        if ev.get("type") == "content_block_delta":
+            d = ev.get("delta") or {}
+            if d.get("type") == "text_delta":
+                chunk = d.get("text") or ""
+                if chunk:
+                    out.append({"kind": "_text_delta", "idx": int(ev.get("index", 0)), "chunk": chunk})
     elif t == "assistant":
-        for b in (obj.get("message") or {}).get("content", []):
+        for i, b in enumerate((obj.get("message") or {}).get("content", [])):
             if b.get("type") == "text" and b.get("text", "").strip():
-                out.append({"kind": "message", "text": b["text"]})
+                # _block_idx ties this canonical/final message to any partials emitted
+                # for the same block index during streaming
+                out.append({"kind": "message", "text": b["text"], "_block_idx": i})
             elif b.get("type") == "tool_use":
                 name = b.get("name") or ""
                 if name.startswith("mcp__studio__"):
@@ -621,26 +640,33 @@ class AgentManager:
 
     def _emit(self, sid: str, ev: dict) -> None:
         ev = {"t": round(time.time(), 3), **ev}
-        arr = self.events.setdefault(sid, [])
-        arr.append(ev)
-        if len(arr) > MAX_EVENTS:
-            del arr[: len(arr) - MAX_EVENTS]
-        if ev.get("kind") == "system" and ev.get("threadId"):
-            s = self.sessions.get(sid)
-            if s and not s.threadId:
-                s.threadId = ev["threadId"]
-        if ev.get("kind") == "usage":
-            s = self.sessions.get(sid)
-            if s:
-                s.usage = ev.get("usage")
-        try:
-            d = SESSIONS_DIR / sid
-            d.mkdir(parents=True, exist_ok=True)
-            with open(d / "transcript.jsonl", "a") as f:
-                f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
-        except Exception:
-            pass
-        # fan out to any live SSE subscribers (no-op if none)
+        # PARTIAL events (per-token streaming chunks): fan out to live SSE subscribers
+        # only — they are NOT added to the in-memory events list and NOT written to
+        # the transcript file. The canonical (non-partial) message with the same id
+        # arrives at block completion and IS persisted; the UI dedupes by id, so a
+        # late reconnect / replay sees only the final and never half-typed text.
+        is_partial = ev.get("partial") is True
+        if not is_partial:
+            arr = self.events.setdefault(sid, [])
+            arr.append(ev)
+            if len(arr) > MAX_EVENTS:
+                del arr[: len(arr) - MAX_EVENTS]
+            if ev.get("kind") == "system" and ev.get("threadId"):
+                s = self.sessions.get(sid)
+                if s and not s.threadId:
+                    s.threadId = ev["threadId"]
+            if ev.get("kind") == "usage":
+                s = self.sessions.get(sid)
+                if s:
+                    s.usage = ev.get("usage")
+            try:
+                d = SESSIONS_DIR / sid
+                d.mkdir(parents=True, exist_ok=True)
+                with open(d / "transcript.jsonl", "a") as f:
+                    f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
+            except Exception:
+                pass
+        # fan out to any live SSE subscribers (partials included so the UI streams)
         for q in list(self._subscribers.get(sid, [])):
             try:
                 q.put_nowait(ev)
@@ -1250,6 +1276,12 @@ class AgentManager:
         # left non-zero in-flight counts after a kill; new turn starts from scratch)
         self._tool_in_flight[s.id] = 0
         self._pending_call[s.id] = []
+        # per-turn streaming state: accumulate text chunks per block index (Claude only
+        # — Codex doesn't stream agent_message). The turn_id makes the message id
+        # unique across turns (so the UI never accidentally collapses two turns' final
+        # messages into one because of an index reuse).
+        turn_id = uuid.uuid4().hex[:8]
+        text_acc: dict[int, str] = {}
         turn_flags: dict = {}
         drain = asyncio.create_task(self._drain_stderr(s.id, proc.stderr, turn_flags))
         while True:
@@ -1267,6 +1299,24 @@ class AgentManager:
             except json.JSONDecodeError:
                 continue
             for ev in normalize(obj):
+                # ----- live text streaming (Claude only). _text_delta is an internal
+                # marker from the normalizer; we accumulate per block_idx and emit an
+                # id-stable PARTIAL `message` event so the UI sees the text grow chunk
+                # by chunk. Not persisted (the final message replaces it).
+                if ev.get("kind") == "_text_delta":
+                    idx = int(ev.get("idx", 0))
+                    text_acc[idx] = text_acc.get(idx, "") + (ev.get("chunk") or "")
+                    self._emit(s.id, {"kind": "message",
+                                      "id": f"m{turn_id}-{idx}",
+                                      "text": text_acc[idx],
+                                      "partial": True})
+                    continue
+                # The canonical (full-text) `message` from the assistant event carries
+                # `_block_idx`; tag it with the SAME id as the partials so the UI
+                # replaces the streaming text with the final/persisted version.
+                if ev.get("kind") == "message" and "_block_idx" in ev:
+                    idx = int(ev.pop("_block_idx"))
+                    ev["id"] = f"m{turn_id}-{idx}"
                 self._emit(s.id, ev)
                 kind = ev.get("kind")
                 # ----- preempt-safety bookkeeping + ack-suppression -----
@@ -1448,6 +1498,7 @@ class AgentManager:
         cfg_path = SESSIONS_DIR / s.id / "mcp.json"
         cfg_path.write_text(json.dumps(cfg))
         cmd = [binary, "-p", prompt, "--output-format", "stream-json", "--verbose",
+               "--include-partial-messages",   # real per-token streaming of text blocks
                "--model", CLAUDE_MODEL, "--effort", CLAUDE_EFFORT,
                "--mcp-config", str(cfg_path), "--allowedTools", "mcp__studio",
                "--permission-mode", "bypassPermissions"]
