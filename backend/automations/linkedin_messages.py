@@ -10,6 +10,30 @@ set two ways, in priority order: a per-row ``message`` column in the input datas
 across the fallback messages actually sent). Output = the input list with a
 ``status`` (and ``detail``) column.
 
+**Media (images / video / docs) — same shape as messages**:
+
+  1. A per-row ``media`` column on the input dataset (``file_list``,
+     personalised per recipient — overrides everything).
+  2. The ``media`` param (``file_list``): the same set of files attached to
+     every message that doesn't have its own per-row override.
+
+Media is NEVER round-robined: each message is one complete artefact. The whole
+attached set lands in a single LinkedIn DM. Rules (verified live against the
+compose bubble's two hidden ``<input type=file>`` elements):
+
+* **Up to 10 attachments per message** (LinkedIn's UI accepts multiple
+  attachments via repeated paperclip clicks; we cap at 10 to stay well within
+  the bubble's standard behaviour).
+* **Accepted mimes** mirror LinkedIn's paperclip ``accept`` list: images
+  (``image/jpeg|png|gif|webp``), videos (``video/mp4|quicktime``), documents
+  (``application/pdf``, Word / PowerPoint / Excel, plain text). Mixed is FINE
+  — LinkedIn treats every attachment as a generic message attachment, not a
+  gallery.
+* Wrong mime / over the cap / zero size / file missing on disk →
+  ``media_invalid`` (message NOT sent — all-or-nothing).
+* Upload-stage failure (the preview never lands in the bubble after we set
+  the file on the input) → ``media_failed`` (message NOT sent).
+
 Built to be resilient to everything a logged-in LinkedIn session does, learned by
 driving real profiles by hand (the same way [[linkedin_connections]] was):
 
@@ -51,6 +75,33 @@ import re
 from automations import userkit
 
 PROFILE_RE = re.compile(r"/in/([^/?#]+)", re.I)
+
+# ---- media policy ------------------------------------------------------------
+# Verified live by inspecting the compose's two hidden <input type=file> elements:
+#   image-only:   image/*  (the photo button)
+#   paperclip:    image/*,.ai,.psd,.pdf,.doc,.docx,.ppt,.pptx,.pps,.ppsx,.xls,
+#                 .xlsx,.txt,.eml,.mov,.mp4
+# Both are multiple=false; multi-attach works by calling set_input_files on the
+# paperclip input once per file (the bubble accumulates previews). We always use
+# the paperclip selector (the widest accept set, so the same call attaches anything).
+MEDIA_ACCEPT_SELECTOR = 'input[type="file"][accept*=".pdf"]'
+ACCEPTED_MEDIA_MIMES = {
+    # images
+    "image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp",
+    # videos
+    "video/mp4", "video/quicktime",
+    # documents
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # pptx
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",         # xlsx
+    "text/plain",
+    "message/rfc822",                                                            # .eml
+}
+MAX_ATTACHMENTS_PER_MESSAGE = 10
 
 # ---- bilingual (EN + IT) accessible-name patterns ----------------------------
 RX_MESSAGE     = re.compile(r"^(message|messaggio|invia messaggio)$", re.I)
@@ -110,6 +161,80 @@ def _row_message(row: dict) -> str:
         if row.get(k):
             return re.sub(r"\s+", " ", str(row[k])).strip()
     return ""
+
+
+# ---- media ------------------------------------------------------------------
+def _resolve_media(params: dict, row: dict) -> list[dict]:
+    """Resolve the attachment(s) for this message: per-row ``media`` column on
+    the input dataset (already expanded to dicts by the orchestrator) wins;
+    else the workflow ``media`` param (a list of file records). Returns a list
+    of file dicts each carrying ``path``/``name``/``mime``. Empty list means
+    "text-only message"."""
+    files = userkit.input_files(row, "media") or userkit.input_files(row, "files")
+    if files:
+        return files
+    single = userkit.input_file(row, "media")
+    if single:
+        return [single]
+    raw = params.get("media")
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        # already expanded dicts (orchestrator preserves) — or list of ids/strings
+        if raw and isinstance(raw[0], dict) and raw[0].get("path"):
+            return [m for m in raw if isinstance(m, dict) and m.get("path")]
+        ids = [str(x).strip() for x in raw if str(x).strip()]
+    elif isinstance(raw, dict) and raw.get("path"):
+        return [raw]
+    else:
+        s = str(raw).strip()
+        if not s:
+            return []
+        if s[:1] == "[":
+            try:
+                ids = [str(x).strip() for x in json.loads(s) if str(x).strip()]
+            except (ValueError, TypeError):
+                return []
+        else:
+            ids = [s]
+    try:
+        from orchestrator import files as _files
+    except ImportError:
+        return []
+    out: list[dict] = []
+    for fid in ids:
+        rec = _files.get(fid)
+        if rec:
+            out.append(rec)
+    return out
+
+
+def _classify_media(files: list[dict]) -> tuple[bool, str]:
+    """Validate ``files`` against LinkedIn's accept set + count cap. Returns
+    ``(ok, error)`` — when not ok, the message is NOT sent (all-or-nothing).
+    Empty list ``files`` is treated as "no media, text-only message" and
+    is always ok."""
+    if not files:
+        return True, ""
+    if len(files) > MAX_ATTACHMENTS_PER_MESSAGE:
+        return False, (f"too many attachments: {len(files)} "
+                       f"(cap is {MAX_ATTACHMENTS_PER_MESSAGE} per message)")
+    bad: list[str] = []
+    for f in files:
+        m = (f.get("mime") or "").lower()
+        if m not in ACCEPTED_MEDIA_MIMES:
+            bad.append(f"{f.get('name') or '?'}({m or 'unknown'})")
+    if bad:
+        return False, (f"unsupported mime: {bad[:3]} (LinkedIn accepts images, "
+                       f"videos, PDFs and Office docs)")
+    import os as _os
+    for f in files:
+        p = f.get("path") or ""
+        if not p or not _os.path.isfile(p):
+            return False, f"missing file on disk: {f.get('name') or p}"
+        if _os.path.getsize(p) == 0:
+            return False, f"empty file: {f.get('name') or p}"
+    return True, ""
 
 
 # ---- main-frame page facts (owner, degree, interstitials) --------------------
@@ -298,9 +423,103 @@ def _is_disabled(n) -> bool:
 
 
 # ---- send to one connection --------------------------------------------------
-async def _send_message(sess, owner: str, message: str) -> tuple[str, str]:
-    """Open the in-card Message compose for ``owner`` and send ``message``.
-    Returns (status, detail). Assumes the caller verified 1st-degree."""
+async def _attach_media(sess, files: list[dict]) -> tuple[bool, str]:
+    """Attach ``files`` (already validated by ``_classify_media``) to the open
+    compose bubble. LinkedIn's paperclip ``<input type=file>`` lives in shadow
+    DOM with ``multiple=false``, so we call ``set_input_files`` on it once per
+    file (the bubble accumulates previews). After all files are pushed we poll
+    the bubble until the staged-file count matches what we asked for, so a
+    half-uploaded message can never be sent. Returns ``(ok, detail)``."""
+    if not files:
+        return True, ""
+    # Each upload call sets a single file on the shadow input. Pass FilePayload
+    # (name + mime + buffer) so LinkedIn sees the original human filename in
+    # the bubble preview, not the on-disk sha256.ext from the file store.
+    for f in files:
+        try:
+            await sess.upload(
+                [f["path"]],
+                selector=MEDIA_ACCEPT_SELECTOR,
+                names=[f.get("name") or ""],
+                mimes=[f.get("mime") or ""],
+            )
+        except Exception as e:
+            return False, f"attach failed for {f.get('name') or '?'}: {str(e)[:120]}"
+        await sess.sleep(random.randint(400, 800))
+
+    # Poll for the previews / filename labels to appear. Each file's name shows
+    # up in the bubble as either an `alt="Preview image for <name>"` (images)
+    # OR as plain text (videos / docs / unrecognised). Look for either signal.
+    wanted = [f.get("name") or "" for f in files if f.get("name")]
+    js = r"""(needles) => {
+      const wants = needles.map(s => s.toLowerCase());
+      const seen = new Set();
+      function consider(s) {
+        const t = (s || '').toLowerCase();
+        for (let i = 0; i < wants.length; i++) if (wants[i] && t.indexOf(wants[i]) !== -1) seen.add(wants[i]);
+      }
+      function walk(root) {
+        const imgs = root.querySelectorAll('img');
+        for (let i = 0; i < imgs.length; i++) consider(imgs[i].alt);
+        // Filenames appear in <li>/aria-labels/buttons (e.g. "Remove <name>").
+        const labelled = root.querySelectorAll('[aria-label], li, span, button');
+        for (let i = 0; i < labelled.length; i++) {
+          consider(labelled[i].getAttribute && labelled[i].getAttribute('aria-label'));
+          consider(labelled[i].textContent);
+        }
+        const all = root.querySelectorAll('*');
+        for (let i = 0; i < all.length; i++) if (all[i].shadowRoot) walk(all[i].shadowRoot);
+      }
+      walk(document);
+      return seen.size;
+    }"""
+    want = len(wanted)
+    for _ in range(24):  # ~12s
+        await sess.sleep(500)
+        try:
+            d = await sess.evaluate(js, wanted)
+            if int(d or 0) >= want:
+                return True, ""
+        except Exception:
+            pass
+    return False, f"only landed {await _media_visible_count(sess, wanted)}/{want} attachment(s) in the bubble"
+
+
+async def _media_visible_count(sess, wanted_names: list[str]) -> int:
+    js = r"""(needles) => {
+      const wants = needles.map(s => s.toLowerCase());
+      const seen = new Set();
+      function consider(s) {
+        const t = (s || '').toLowerCase();
+        for (let i = 0; i < wants.length; i++) if (wants[i] && t.indexOf(wants[i]) !== -1) seen.add(wants[i]);
+      }
+      function walk(root) {
+        const imgs = root.querySelectorAll('img');
+        for (let i = 0; i < imgs.length; i++) consider(imgs[i].alt);
+        const labelled = root.querySelectorAll('[aria-label], li, span, button');
+        for (let i = 0; i < labelled.length; i++) {
+          consider(labelled[i].getAttribute && labelled[i].getAttribute('aria-label'));
+          consider(labelled[i].textContent);
+        }
+        const all = root.querySelectorAll('*');
+        for (let i = 0; i < all.length; i++) if (all[i].shadowRoot) walk(all[i].shadowRoot);
+      }
+      walk(document);
+      return seen.size;
+    }"""
+    try:
+        d = await sess.evaluate(js, wanted_names)
+        return int(d or 0)
+    except Exception:
+        return 0
+
+
+async def _send_message(sess, owner: str, message: str, media: list[dict] | None = None) -> tuple[str, str]:
+    """Open the in-card Message compose for ``owner`` and send ``message`` with
+    optional ``media`` attachments (already validated by ``_classify_media``).
+    Returns (status, detail). Assumes the caller verified 1st-degree.
+    All-or-nothing on media: if attach fails the message is NOT sent."""
+    media = media or []
     await _scroll_top(sess)
     await sess.sleep(random.randint(250, 450))
     await _close_all_bubbles(sess)
@@ -324,7 +543,23 @@ async def _send_message(sess, owner: str, message: str) -> tuple[str, str]:
     if not box:
         return "not_messageable", "compose box did not open"
 
-    # type into the compose textbox (Playwright pierces shadow DOM by index)
+    # Attach media BEFORE typing. If attach fails we close the draft (Escape)
+    # and abort with a clean media_failed — the message is never sent partial.
+    if media:
+        ok, err = await _attach_media(sess, media)
+        if not ok:
+            try:
+                await sess.press("Escape")
+            except Exception:
+                pass
+            return "media_failed", err
+
+    # type into the compose textbox (Playwright pierces shadow DOM by index).
+    # re-resolve in case the indices shifted after the upload settle.
+    if media:
+        box, bubble = _owner_compose(await _nodes(sess), owner)
+        if not box:
+            return "message_failed", "compose textbox vanished after attach"
     try:
         await sess.type(int(box["index"]), message)
     except Exception as e:
@@ -376,7 +611,8 @@ async def _send_message(sess, owner: str, message: str) -> tuple[str, str]:
     return "message_failed", "could not confirm send"
 
 
-async def process_profile(sess, url: str, message: str) -> tuple[str, str, str]:
+async def process_profile(sess, url: str, message: str,
+                          media: list[dict] | None = None) -> tuple[str, str, str]:
     await sess.goto(url)
     await sess.sleep(random.randint(1800, 2800))
     if not await sess.wait_for_selector("main", 12000):
@@ -400,7 +636,7 @@ async def process_profile(sess, url: str, message: str) -> tuple[str, str, str]:
         deg = p.get("degree") or "not 1st-degree"
         return owner, "not_connection", f"not a 1st-degree connection ({deg})"
 
-    status, detail = await _send_message(sess, owner, message)
+    status, detail = await _send_message(sess, owner, message, media=media)
     # tidy up: close the bubble we just used so bubbles don't accumulate over the run
     await _close_all_bubbles(sess, rounds=3)
     return owner, status, detail
@@ -446,8 +682,24 @@ async def run(params, sess, inputs):
                         "detail": "no message for this row (no per-row message and no param)"})
             userkit.progress(i, total, message=f"{i}/{total} (no message)")
             continue
+        # Media resolution + validation: per-row 'media' column wins, else the
+        # workflow 'media' param. Validate BEFORE driving the browser so an
+        # invalid set never produces a partial DM (no half-attached messages).
         try:
-            owner, status, detail = await process_profile(sess, url, message)
+            media = _resolve_media(params, row)
+        except Exception as e:
+            media = []
+            userkit.log(f"[messages] {url} media resolve error: {e}")
+        media_ok, media_err = _classify_media(media)
+        if not media_ok:
+            out.append({"profile_url": url, "name": name_in,
+                        "status": "media_invalid", "detail": media_err})
+            userkit.progress(i, total, message=f"{i}/{total} {name_in or url} → media_invalid")
+            if i < total:
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+            continue
+        try:
+            owner, status, detail = await process_profile(sess, url, message, media=media)
         except Exception as e:
             owner, status, detail = name_in, "error", str(e)[:160]
             userkit.log(f"[messages] {url} error: {e}")

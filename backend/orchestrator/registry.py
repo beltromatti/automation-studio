@@ -291,7 +291,10 @@ WORKFLOWS: list[WorkflowDef] = [
         "1st-degree connection, one at a time and human-paced. Skips non-connections and pending invites "
         "(no message), and reports why anyone else couldn't be messaged. The message can be personalized "
         "per recipient via a 'message' column in the input, or set once (with optional variants to alternate). "
-        "Output is the input list with a status column. Uses your logged-in profile.",
+        "Optional media (images, videos, PDFs, Office docs — up to 10 attachments per message) is attached "
+        "to each DM — set once via the Media field, or per-row via a 'media' (file_list) column on the input "
+        "dataset. Media is never round-robined: each message is one complete artefact, all-or-nothing on "
+        "attach failure. Output is the input list with a status column. Uses your logged-in profile.",
         icon="send",
         module="automations.linkedin_messages",
         profile="shared",
@@ -304,13 +307,23 @@ WORKFLOWS: list[WorkflowDef] = [
                                "To rotate between several variants round-robin, separate them with || "
                                "in this same field. Overridden per-recipient by a 'message' column in "
                                "the input dataset, if present."),
+            WorkflowParam("media", "Media (attachments)", "file_list",
+                          help="Optional. Up to 10 attachments per message — images (jpeg/png/gif/webp), "
+                               "videos (mp4/mov), PDFs and Office docs are accepted (LinkedIn treats every "
+                               "attachment generically, so mixing types is fine). Same files attached to "
+                               "every message that doesn't have its own per-row override. For granular "
+                               "per-recipient media, set a 'media' (file_list) column on the input dataset "
+                               "— that wins over this field. NOT round-robined: each message is one "
+                               "complete artefact."),
             WorkflowParam("maxMessages", "Max messages this run", "number", default=0,
                           help="Safety cap on how many messages to actually send (0 = no cap). "
                                "Non-connections / pending / can't-message profiles don't count."),
         ],
         build_argv=lambda p: ["--params-json", json.dumps(p)],
-        # a per-row `message` column personalizes the send (optional); profile_url is required
-        input_contract=[{"name": "profile_url", "type": "text"}, {"name": "message", "type": "text"}],
+        # `message` AND `media` are per-row optional overrides; profile_url is required
+        input_contract=[{"name": "profile_url", "type": "text"},
+                        {"name": "message", "type": "text"},
+                        {"name": "media", "type": "file_list"}],
         output_contract=[{"name": "profile_url", "type": "text"}, {"name": "name", "type": "text"},
                          {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
     ),
