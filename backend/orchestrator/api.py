@@ -6,9 +6,11 @@ import csv as csvmod
 import io
 from contextlib import asynccontextmanager
 
+import asyncio
+import json as jsonmod
 from fastapi import FastAPI, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 
 from .manager import get_manager
 from .registry import (all_workflows, get_workflow, public_workflow, save_user_workflow,
@@ -416,6 +418,56 @@ def create_app() -> FastAPI:
     async def agent_stop(sid: str):
         from .agents import get_agents
         return await get_agents().stop(sid)
+
+    @app.post("/api/agents/sessions/{sid}/cancel-steer")
+    async def agent_cancel_steer(sid: str, body: dict = Body(...)):
+        """Remove a queued steer (for the UI list of pending messages above the input)."""
+        from .agents import get_agents
+        return get_agents().cancel_steer(sid, int(body.get("index", -1)))
+
+    @app.get("/api/agents/sessions/{sid}/events/stream")
+    async def agent_events_stream(sid: str):
+        """Server-Sent Events stream of this session's events. The frontend uses it
+        to render chunks live (no polling). On connect, replays all events so far so
+        a reconnect / late subscriber catches up without a separate fetch."""
+        from .agents import get_agents
+        mgr = get_agents()
+        if not mgr.get_session(sid):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        async def gen():
+            q = mgr.subscribe(sid)
+            try:
+                # replay backlog first so reconnects see everything
+                for ev in list(mgr.get_events(sid)):
+                    yield f"data: {jsonmod.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+                # heartbeat marker so the client knows the replay is done
+                yield "event: ready\ndata: {}\n\n"
+                while True:
+                    try:
+                        ev = await asyncio.wait_for(q.get(), timeout=20)
+                        yield f"data: {jsonmod.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+                    except asyncio.TimeoutError:
+                        # keep-alive comment so proxies / electron don't close the stream
+                        yield ": keep-alive\n\n"
+            finally:
+                mgr.unsubscribe(sid, q)
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache, no-transform",
+                                          "X-Accel-Buffering": "no"})
+
+    @app.post("/api/agents/sessions/{sid}/fake-notify")
+    async def agent_fake_notify(sid: str, body: dict = Body(default=None)):
+        """Dev/test hook: synthesize a notification for this session so we can exercise
+        the preemption/wake/coalescing paths without launching a real workflow."""
+        from .agents import get_agents
+        b = body or {}
+        kind = b.get("kind", "workflow_finished")
+        payload = b.get("payload") or {"runId": b.get("runId", "fake"),
+                                       "status": b.get("status", "succeeded"),
+                                       "workflow": b.get("workflow", "fake-workflow"),
+                                       "rows": b.get("rows", 1)}
+        get_agents().notify(sid, kind, payload)
+        return {"ok": True}
 
     @app.get("/api/agents")
     async def agents_list():
