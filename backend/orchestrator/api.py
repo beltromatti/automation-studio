@@ -548,7 +548,8 @@ def create_app() -> FastAPI:
         try:
             s = get_agents().launch(body["agentId"], body.get("profileId") or "ephemeral",
                                     body.get("prompt", ""), bool(body.get("watch")),
-                                    body.get("engine") or "codex", start_at=_resolve_at(body))
+                                    body.get("engine") or "codex", start_at=_resolve_at(body),
+                                    file_ids=body.get("files") or None)
             return {"session": get_agents().get_session(s.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
@@ -577,7 +578,7 @@ def create_app() -> FastAPI:
     @app.post("/api/agents/sessions/{sid}/steer")
     async def agent_steer(sid: str, body: dict = Body(...)):
         from .agents import get_agents
-        return get_agents().steer(sid, body.get("message", ""))
+        return get_agents().steer(sid, body.get("message", ""), file_ids=body.get("files") or None)
 
     @app.post("/api/agents/sessions/{sid}/stop")
     async def agent_stop(sid: str):

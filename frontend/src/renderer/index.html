@@ -3,7 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <!-- The local backend serves file previews / videos / pdf iframes off a -->
+    <!-- random localhost port the Electron main process picks at boot, so -->
+    <!-- img / media / frame need to allow http://127.0.0.1:* and http://localhost:* -->
+    <!-- (not just `connect-src`, which only covers fetch/XHR). blob: is for -->
+    <!-- in-browser previews like screenshot blobs. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src http://127.0.0.1:* http://localhost:*; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; media-src 'self' blob: http://127.0.0.1:* http://localhost:*; frame-src 'self' http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self'" />
     <title>Automation Studio</title>
   </head>
   <body>

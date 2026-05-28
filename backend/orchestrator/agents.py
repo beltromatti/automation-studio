@@ -240,6 +240,39 @@ NOTIFY_SAFE_TOOLS = {"studio_wait_run", "studio_run_status", "studio_run_result"
                      "studio_run_to_dataset", "studio_run_logs"}
 BROWSER_ACQUIRE_WAIT = 4.0  # seconds to wait for a busy profile before proceeding browserless
 
+
+def _decorate_prompt_with_files(prompt: str, file_ids: list[str]) -> str:
+    """When the user attaches Studio files to the launch prompt or to a steer,
+    prepend a small block listing each one (name, mime, size, id, on-disk path)
+    so the engine starts the turn already knowing what's available. The agent
+    reaches the content via ``studio_files_get(<id>)``, ``studio_files_view(<id>)``
+    (for text), or its native ``Read``/``view_image`` on the path."""
+    if not file_ids:
+        return prompt
+    try:
+        from . import files as _files
+    except ImportError:
+        return prompt
+    lines = []
+    for fid in file_ids:
+        rec = _files.get(str(fid).strip())
+        if not rec:
+            lines.append(f"- {fid} (missing — not in the file store)")
+            continue
+        size = rec.get("size") or 0
+        if size > 1_000_000:
+            human = f"{size / 1_000_000:.1f} MB"
+        elif size > 1000:
+            human = f"{size / 1000:.1f} KB"
+        else:
+            human = f"{size} B"
+        lines.append(f"- {rec['name']} ({rec['mime']}, {human}) — id `{rec['id']}` — path: {rec['path']}")
+    header = (f"[Attached files — {len(file_ids)} file{'s' if len(file_ids) != 1 else ''} the user wants "
+              f"you to use this turn. Inspect via studio_files_get / studio_files_view (text mimes), "
+              f"or read the path with your native Read / view_image tool. Reference them by id when "
+              f"talking about them.]\n")
+    return header + "\n".join(lines) + ("\n\n" if prompt else "") + (prompt or "")
+
 # Canonical, TOOL-AGNOSTIC preamble prepended to every agent's system prompt. It
 # defines the agent's shape/role inside Automation Studio without naming specific
 # tools (those are per-agent — the MCP tool list/descriptions tell the agent what
@@ -759,7 +792,8 @@ class AgentManager:
         return self.events.get(sid, [])
 
     def launch(self, agent_id: str, profile_id: str, prompt: str, watch: bool = False,
-               engine: str = "codex", start_at: float | None = None) -> AgentSession:
+               engine: str = "codex", start_at: float | None = None,
+               file_ids: list[str] | None = None) -> AgentSession:
         d = self.defs.get(agent_id)
         if not d:
             raise ValueError(f"unknown agent: {agent_id}")
@@ -781,35 +815,49 @@ class AgentManager:
             profile_name = prof["name"]
         sid = uuid.uuid4().hex[:8]
         scheduled = bool(start_at) and start_at > time.time() + 1
+        # Decorate the prompt with an attached-files preamble the engine sees as
+        # part of its FIRST message (and the user sees in the transcript). The
+        # ids point at the Studio file store; the agent reaches them via
+        # studio_files_get / studio_files_view / its native Read on path.
+        full_prompt = _decorate_prompt_with_files(prompt, file_ids or [])
         s = AgentSession(id=sid, agentId=agent_id, agentName=d.name, engine=engine, scopes=d.scopes,
-                         profileId=profile_id, profileName=profile_name, prompt=prompt,
+                         profileId=profile_id, profileName=profile_name, prompt=full_prompt,
                          status="scheduled" if scheduled else "starting",
                          createdAt=time.time(), watch=bool(watch),
                          scheduledAt=(start_at if scheduled else None),
-                         scheduledPrompt=(prompt if scheduled else None))
+                         scheduledPrompt=(full_prompt if scheduled else None))
         self.sessions[sid] = s
         self.events[sid] = []
         if scheduled:
             when = max(0, int(start_at - time.time()))
             self._emit(sid, {"kind": "system", "text": f"⏰ scheduled to start in ~{when}s"})
+        if file_ids:
+            self._emit(sid, {"kind": "system", "text": f"📎 attached {len(file_ids)} file(s) to launch prompt"})
         self._save_sessions()
         if not scheduled:                # future launches are fired by the Timeline
-            asyncio.create_task(self._run_turn(s, prompt, resume=False))
+            asyncio.create_task(self._run_turn(s, full_prompt, resume=False))
         return s
 
-    def steer(self, sid: str, message: str) -> dict:
-        """Send a message to a session. If a turn is in flight, it's queued for the
-        next turn; otherwise it REACTIVATES the session (resumes the native thread).
-        Works from done/failed/stopped — sessions are continuable."""
+    def steer(self, sid: str, message: str, file_ids: list[str] | None = None) -> dict:
+        """Send a message to a session, optionally with attached Studio files.
+        If a turn is in flight, it's queued for the next turn; otherwise it
+        REACTIVATES the session (resumes the native thread). Works from
+        done/failed/stopped — sessions are continuable."""
         s = self.sessions.get(sid)
         if not s:
             return {"ok": False, "error": "no such session"}
+        full = _decorate_prompt_with_files(message, file_ids or [])
         if s.status in _RUNNING:
-            s.pendingSteers.append(message)   # delivered as the next turn when this one ends
-            self._emit(sid, {"kind": "system", "text": "↩ message queued — runs after the current turn"})
+            s.pendingSteers.append(full)   # delivered as the next turn when this one ends
+            note = "↩ message queued — runs after the current turn"
+            if file_ids:
+                note += f" · 📎 {len(file_ids)} file(s) attached"
+            self._emit(sid, {"kind": "system", "text": note})
             self._save_sessions()
             return {"ok": True, "queued": True}
-        asyncio.create_task(self._run_turn(s, message, resume=True))
+        if file_ids:
+            self._emit(sid, {"kind": "system", "text": f"📎 attached {len(file_ids)} file(s) to next turn"})
+        asyncio.create_task(self._run_turn(s, full, resume=True))
         return {"ok": True, "queued": False}
 
     def cancel_steer(self, sid: str, steer_index: int) -> dict:

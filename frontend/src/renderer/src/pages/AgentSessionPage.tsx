@@ -7,6 +7,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
+import { FileAttachPopover } from "@/components/FilePickerInput";
 import { jget, jpost, duration, timeAgo, untilTime, BACKEND_URL } from "@/lib/client";
 import type { AgentEvent, AgentSession } from "@/lib/types";
 
@@ -70,6 +71,7 @@ export default function AgentSessionPage() {
   const [s, setS] = useState<AgentSession | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [steer, setSteer] = useState("");
+  const [steerFilesJson, setSteerFilesJson] = useState("");
   const [busy, setBusy] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);   // follow the agent (auto-scroll) while pinned to bottom
@@ -180,8 +182,13 @@ export default function AgentSessionPage() {
     if (!m) return;
     setBusy(true);
     try {
-      await jpost(`/api/agents/sessions/${id}/steer`, { message: m });
+      let files: string[] | undefined;
+      if (steerFilesJson) {
+        try { const j = JSON.parse(steerFilesJson); if (Array.isArray(j) && j.length) files = j.map(String); } catch {}
+      }
+      await jpost(`/api/agents/sessions/${id}/steer`, { message: m, files });
       setSteer("");
+      setSteerFilesJson("");
       await refreshMeta();
     } finally { setBusy(false); }
   };
@@ -303,10 +310,11 @@ export default function AgentSessionPage() {
             </div>
           )}
           <div className="flex items-end gap-2">
-            <textarea className="input" style={{ height: 44, padding: "11px 12px", resize: "none" }}
+            <textarea className="input flex-1" style={{ height: 44, padding: "11px 12px", resize: "none" }}
                       placeholder={inFlight ? "Steer the agent — runs after the current turn…" : "Send a message to continue this session…"}
                       value={steer} onChange={(e) => setSteer(e.target.value)}
                       onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendSteer(); } }} />
+            <FileAttachPopover value={steerFilesJson} onChange={setSteerFilesJson} />
             <button className="btn btn-primary" disabled={busy || !steer.trim()} onClick={sendSteer}>
               <Icon name={inFlight ? "send" : "play"} size={14} /> {inFlight ? "Send" : "Continue"}
             </button>

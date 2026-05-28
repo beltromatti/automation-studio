@@ -2,6 +2,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
+import { FilePickerInput } from "@/components/FilePickerInput";
 import { jget, jpost } from "@/lib/client";
 import { SessionRow } from "@/components/SessionRow";
 import { DependencyModal, useChromeGate } from "@/components/DependencyModal";
@@ -17,6 +18,7 @@ export default function AgentLaunchPage() {
   const [profileId, setProfileId] = useState("ephemeral");
   const [engine, setEngine] = useState<AgentEngine>("codex");
   const [prompt, setPrompt] = useState("");
+  const [filesJson, setFilesJson] = useState("");  // JSON array of file ids attached to the launch prompt
   const [watch, setWatch] = useState(false);
   const [scheduleMin, setScheduleMin] = useState(0); // 0 = launch now; else minutes from now
   const [busy, setBusy] = useState(false);
@@ -49,8 +51,14 @@ export default function AgentLaunchPage() {
     if (!prompt.trim()) return;
     setBusy(true); setError("");
     try {
+      let files: string[] | undefined;
+      if (filesJson) {
+        try { const j = JSON.parse(filesJson); if (Array.isArray(j) && j.length) files = j.map(String); } catch {}
+      }
       const { session } = await jpost<{ session: AgentSession }>("/api/agents/sessions",
-        { agentId: id, profileId, prompt, watch, engine, inSeconds: scheduleMin > 0 ? scheduleMin * 60 : undefined });
+        { agentId: id, profileId, prompt, watch, engine,
+          inSeconds: scheduleMin > 0 ? scheduleMin * 60 : undefined,
+          files });
       navigate(`/agents/sessions/${session.id}`);
     } catch (e) { setError(String((e as Error).message)); setBusy(false); }
   };
@@ -83,6 +91,11 @@ export default function AgentLaunchPage() {
               <textarea className="input" style={{ height: 96, padding: 11, lineHeight: 1.5 }} autoFocus
                         placeholder={"Tell the agent what to do — e.g. “Run LinkedIn People for data engineers in Milan, capture into a dataset, dedup by profile URL, then project the links into a connect-input dataset.”"}
                         value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="label">Attach files <span className="text-faint">— the agent sees their id + path in its first message</span></label>
+              <FilePickerInput multiple value={filesJson} onChange={setFilesJson} />
             </div>
 
             <div className="flex flex-col gap-1.5">
