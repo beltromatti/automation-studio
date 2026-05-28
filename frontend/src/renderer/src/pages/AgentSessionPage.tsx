@@ -1,5 +1,10 @@
 import { Link, useParams } from "react-router-dom";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
 import { jget, jpost, duration, timeAgo, untilTime } from "@/lib/client";
@@ -8,9 +13,12 @@ import type { AgentEvent, AgentSession } from "@/lib/types";
 const STATUS_COLOR: Record<string, string> = {
   starting: "#3b9eff", queued: "#9aa0a6", running: "#3b9eff",
   waiting: "#f5a623", scheduled: "#9b8cff",
-  done: "#2bd576", failed: "#ff5c5c", canceled: "#6e6e6e",
+  done: "#2bd576", failed: "#ff5c5c", stopped: "#6e6e6e",
+  // legacy fallback (older sessions persisted as "canceled" before the rename)
+  canceled: "#6e6e6e",
 };
 const IN_FLIGHT = ["starting", "queued", "running"]; // a turn is running (or waiting for a profile)
+const AT_REST = ["done", "failed", "stopped", "waiting", "scheduled"];
 
 function unwrap(result?: string): string {
   if (!result) return "";
@@ -21,43 +29,130 @@ function unwrap(result?: string): string {
   } catch { return result; }
 }
 
+// Pre-compute, per event index: is this `message` the LAST message of its turn?
+// If so, what was the turn's elapsed time (start = the user/wake system event that
+// kicked the turn off; end = the next status event after this message). We mark
+// only end-of-turn messages — mid-turn messages don't get the time pill.
+type TurnInfo = { endOfTurn: boolean; elapsedSec?: number };
+function computeTurnInfo(events: AgentEvent[]): Record<number, TurnInfo> {
+  const out: Record<number, TurnInfo> = {};
+  // walk forward, tracking the most recent turn-start timestamp
+  let turnStartT: number | undefined;
+  const isTurnStart = (e: AgentEvent) =>
+    e.kind === "system" && (e as any).role === "user";
+  const isRest = (e: AgentEvent) =>
+    e.kind === "status" && AT_REST.includes(((e as any).status as string) || "");
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (isTurnStart(e)) turnStartT = (e as any).t;
+    if (e.kind !== "message") continue;
+    // is this the LAST message of its turn? look forward — if we hit another message
+    // / tool_call / reasoning before a rest-status, it's NOT the last.
+    let endOfTurn = false; let elapsed: number | undefined;
+    for (let j = i + 1; j < events.length; j++) {
+      const f = events[j];
+      if (f.kind === "message" || f.kind === "tool_call" || f.kind === "reasoning") {
+        break;
+      }
+      if (isRest(f)) {
+        endOfTurn = true;
+        if (turnStartT) elapsed = Math.max(0, ((f as any).t || 0) - turnStartT);
+        break;
+      }
+    }
+    out[i] = { endOfTurn, elapsedSec: elapsed };
+  }
+  return out;
+}
+
 export default function AgentSessionPage() {
   const { id = "" } = useParams<{ id: string }>();
   const [s, setS] = useState<AgentSession | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [steer, setSteer] = useState("");
   const [busy, setBusy] = useState(false);
-  const liveRef = useRef(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);   // follow the agent (auto-scroll) while pinned to bottom
   const [showJump, setShowJump] = useState(false);
 
-  const refresh = useCallback(async () => {
+  // Session metadata refresh (status/usage/pendingSteers/threadId/runIds) — events
+  // alone don't carry all of these. Cheap and called: on mount, on visibility →
+  // visible, and after we mutate (steer/cancel-steer/stop).
+  const refreshMeta = useCallback(async () => {
     try {
       const d = await jget<{ session: AgentSession; events: AgentEvent[] }>(`/api/agents/sessions/${id}`);
-      setS(d.session); setEvents(d.events);
-      liveRef.current = IN_FLIGHT.includes(d.session.status);
+      setS(d.session);
+      // events from SSE are authoritative for the live stream; only seed from this
+      // fetch on the FIRST load, when the SSE hasn't replayed the backlog yet.
+      setEvents((prev) => (prev.length === 0 ? d.events : prev));
     } catch {}
   }, [id]);
 
+  // ----- SSE: the chat streams live; no polling. The stream replays the backlog
+  // on connect (sees an `event: ready` after) so reconnects don't miss anything,
+  // and keeps the chat updating in background too (no foreground-only refresh bug).
   useEffect(() => {
-    let stop = false;
-    const loop = async () => {
-      if (stop || document.visibilityState !== "visible") return;
-      await refresh();
-      if (!stop) setTimeout(loop, liveRef.current ? 1200 : 6000);
+    let stopped = false;
+    let es: EventSource | null = null;
+    refreshMeta();
+    const connect = () => {
+      if (stopped) return;
+      try {
+        es = new EventSource(`/api/agents/sessions/${id}/events/stream`);
+      } catch { return; }
+      es.onmessage = (msg) => {
+        try {
+          const ev: AgentEvent = JSON.parse(msg.data);
+          setEvents((arr) => [...arr, ev]);
+          // status events: keep `s` in sync so the bar/labels update live
+          if (ev.kind === "status" && (ev as any).status) {
+            setS((curr) => (curr ? { ...curr, status: (ev as any).status } : curr));
+          }
+        } catch {}
+      };
+      // on the replay-done marker, REPLACE local events with the canonical backlog
+      // so reconnects don't accumulate duplicates from the seed + replay
+      es.addEventListener("ready", () => {
+        // After ready, future onmessage events are the live stream; the events we
+        // already pushed during the replay phase ARE the canonical history.
+      });
+      es.onerror = () => {
+        // EventSource auto-retries; we close + reopen with a small delay on hard error
+        try { es?.close(); } catch {}
+        es = null;
+        if (!stopped) setTimeout(connect, 1500);
+      };
     };
-    loop();
-    return () => { stop = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refresh]);
+    // On replay, the stream emits the full backlog first. We want our local `events`
+    // to mirror that backlog. So we WIPE the seed and rebuild from the stream.
+    setEvents([]);
+    connect();
+    // refresh metadata whenever the window regains focus (status/usage may have
+    // moved while we were away — SSE handles events, this catches the rest)
+    const onVis = () => { if (document.visibilityState === "visible") refreshMeta(); };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", refreshMeta);
+    return () => {
+      stopped = true;
+      try { es?.close(); } catch {}
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", refreshMeta);
+    };
+  }, [id, refreshMeta]);
+
+  // periodic light metadata refresh (every 6s) so usage/turns/pendingSteers stay
+  // in sync — events are live, but these aren't carried by events
+  useEffect(() => {
+    const t = setInterval(refreshMeta, 6000);
+    return () => clearInterval(t);
+  }, [refreshMeta]);
+
+  const turnInfo = useMemo(() => computeTurnInfo(events), [events]);
 
   const scrollToBottom = (behavior: ScrollBehavior) => {
     const el = scrollRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior });
   };
-  // When the user scrolls, decide whether to keep following: stuck to bottom →
-  // follow the agent; scrolled up → stop following and offer "jump to latest".
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -65,17 +160,26 @@ export default function AgentSessionPage() {
     stickRef.current = nearBottom;
     setShowJump(!nearBottom);
   };
-  // New content → follow it only if pinned to the bottom (terminal-like).
   useEffect(() => { if (stickRef.current) scrollToBottom("auto"); }, [events.length]);
 
   const sendSteer = async () => {
     const m = steer.trim();
     if (!m) return;
     setBusy(true);
-    try { await jpost(`/api/agents/sessions/${id}/steer`, { message: m }); setSteer(""); await refresh(); }
+    try {
+      await jpost(`/api/agents/sessions/${id}/steer`, { message: m });
+      setSteer("");
+      await refreshMeta();
+    } finally { setBusy(false); }
+  };
+  const removeSteer = async (index: number) => {
+    try { await jpost(`/api/agents/sessions/${id}/cancel-steer`, { index }); await refreshMeta(); } catch {}
+  };
+  const stop = async () => {
+    setBusy(true);
+    try { await jpost(`/api/agents/sessions/${id}/stop`); await refreshMeta(); }
     finally { setBusy(false); }
   };
-  const stop = async () => { setBusy(true); try { await jpost(`/api/agents/sessions/${id}/stop`); await refresh(); } finally { setBusy(false); } };
 
   if (!s) return (<><Header title="…" /><div className="px-7 py-6 text-faint text-[13px]">Loading agent session…</div></>);
 
@@ -84,10 +188,9 @@ export default function AgentSessionPage() {
   const usage = s.usage as Record<string, number> | null;
   const cost = usage?.total_cost_usd;
   const inTok = usage?.input_tokens; const outTok = usage?.output_tokens;
+  const queued = (s as any).pendingSteers as string[] | undefined;
 
   return (
-    // Three fixed zones like a terminal/agent UI: header + status pinned on top,
-    // the transcript scrolls in the middle (auto-follows the agent), input pinned below.
     <div className="h-full flex flex-col min-h-0">
       <Header
         title={<span className="flex items-center gap-2"><Link to="/agents" className="text-muted hover:text-fg">Agents</Link><Icon name="chevronRight" size={14} /><span className="font-semibold">{s.agentName}</span></span>}
@@ -135,7 +238,7 @@ export default function AgentSessionPage() {
         {s.status === "scheduled" && (
           <div className="max-w-[1000px] mt-2 text-[12.5px] rounded-lg px-3 py-2 flex items-center gap-2" style={{ background: "#9b8cff12", color: "#b9adff", border: "1px solid #322a55" }}>
             <Icon name="clock" size={13} />
-            <span><span className="font-medium">Scheduled</span> — wakes {untilTime(s.scheduledAt)} to continue{s.scheduledPrompt ? `: “${s.scheduledPrompt}”` : ""}. The profile is free meanwhile.</span>
+            <span><span className="font-medium">Scheduled</span> — wakes {untilTime(s.scheduledAt)} to continue{s.scheduledPrompt ? `: "${s.scheduledPrompt}"` : ""}. The profile is free meanwhile.</span>
           </div>
         )}
       </div>
@@ -143,7 +246,7 @@ export default function AgentSessionPage() {
       {/* transcript — the only scrolling zone; auto-follows the agent */}
       <div ref={scrollRef} onScroll={onScroll} className="flex-1 min-h-0 overflow-y-auto px-7 py-4">
         <div className="max-w-[1000px] flex flex-col gap-2.5">
-          {events.map((e, i) => <EventRow key={i} e={e} />)}
+          {events.map((e, i) => <EventRow key={i} e={e} turnInfo={turnInfo[i]} />)}
         </div>
         {showJump && (
           <div className="sticky bottom-0 flex justify-center pt-3 pointer-events-none">
@@ -160,6 +263,23 @@ export default function AgentSessionPage() {
       {/* message bar — fixed bottom. Steer while running, or reactivate a rested session. */}
       <div className="shrink-0 border-t px-7 py-3 bg-panel" style={{ borderColor: "var(--color-line)" }}>
         <div className="max-w-[1000px]">
+          {/* queued steers (when running) — compact list above the input with X to remove */}
+          {queued && queued.length > 0 && (
+            <div className="mb-2 flex flex-col gap-1.5">
+              <div className="text-[10.5px] text-faint uppercase tracking-wider flex items-center gap-1.5">
+                <Icon name="layers" size={11} /> {queued.length} queued message{queued.length === 1 ? "" : "s"} — will run after the current turn
+              </div>
+              {queued.map((q, i) => (
+                <div key={i} className="rounded-lg px-3 py-1.5 flex items-center gap-2 text-[12px]"
+                     style={{ background: "#0072f514", border: "1px solid #0072f540" }}>
+                  <span className="flex-1 truncate" title={q}>{q}</span>
+                  <button className="text-faint hover:text-fg" title="Remove" onClick={() => removeSteer(i)}>
+                    <Icon name="x" size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {!inFlight && (
             <div className="text-[11px] text-faint mb-1.5 flex items-center gap-1.5">
               <Icon name="refresh" size={11} />
@@ -184,38 +304,103 @@ export default function AgentSessionPage() {
   );
 }
 
-function EventRow({ e }: { e: AgentEvent }) {
-  if (e.kind === "system" && e.role === "user") {
+// ---------------------------------------------------------------- event row(s)
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      className="text-[11px] text-faint hover:text-fg inline-flex items-center gap-1"
+      title="Copy raw message"
+      onClick={async () => {
+        try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1200); } catch {}
+      }}>
+      <Icon name="copy" size={11} /> {copied ? "copied" : "copy"}
+    </button>
+  );
+}
+
+function MessageMarkdown({ text }: { text: string }) {
+  // ChatGPT-style: GFM + math (KaTeX). Light styling via prose-ish utility classes.
+  return (
+    <div className="md text-[13px] leading-relaxed">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}>
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function fmtSec(n: number): string {
+  if (n < 60) return `${n.toFixed(n < 10 ? 1 : 0)}s`;
+  const m = Math.floor(n / 60); const s = Math.floor(n % 60);
+  return `${m}m ${s}s`;
+}
+
+function EventRow({ e, turnInfo }: { e: AgentEvent; turnInfo?: TurnInfo }) {
+  // -- user-typed message (a steer or the launch prompt) — pinned right, solid blue
+  if (e.kind === "system" && (e as any).role === "user") {
     return (
-      <div className="self-end max-w-[80%] rounded-xl px-3.5 py-2 text-[12.5px]" style={{ background: "#0072f5", color: "#fff" }}>{e.text}</div>
+      <div className="self-end max-w-[80%] rounded-xl px-3.5 py-2 text-[12.5px] whitespace-pre-wrap"
+           style={{ background: "#0072f5", color: "#fff" }}>{e.text}</div>
     );
   }
-  if (e.kind === "system") return <div className="text-[11px] text-faint flex items-center gap-1.5"><Icon name="dot" size={10} /> {e.text}</div>;
-  if (e.kind === "message") return <div className="card p-3.5 text-[13px] leading-relaxed whitespace-pre-wrap">{e.text}</div>;
-  if (e.kind === "reasoning") return <div className="text-[11.5px] text-faint italic px-1 whitespace-pre-wrap">{e.text}</div>;
-  if (e.kind === "status") return <div className="text-[11px] text-faint flex items-center gap-1.5"><Icon name="clock" size={11} /> {e.status}{e.text ? ` — ${e.text}` : ""}</div>;
+  // -- notification (🔔) — distinct from a plain system note: blue tint card with bell
+  if (e.kind === "system" && (e.text || "").startsWith("🔔")) {
+    const txt = (e.text || "").replace(/^🔔\s*/, "");
+    return (
+      <div className="rounded-lg px-3 py-2 text-[12.5px] flex items-start gap-2"
+           style={{ background: "#0072f514", color: "#9ec8ff", border: "1px solid #0072f540" }}>
+        <Icon name="alert" size={13} />
+        <span><span className="font-medium">Notification:</span> {txt}</span>
+      </div>
+    );
+  }
+  // -- preempting / paused / various meta system notes
+  if (e.kind === "system") return (
+    <div className="text-[11px] text-faint flex items-center gap-1.5"><Icon name="dot" size={10} /> {e.text}</div>
+  );
+  // -- agent message — markdown + KaTeX + copy button; if end-of-turn, also show elapsed
+  if (e.kind === "message") {
+    const raw = (e as any).text as string || "";
+    return (
+      <div className="card p-3.5">
+        <MessageMarkdown text={raw} />
+        <div className="mt-1.5 pt-1.5 flex items-center gap-3 text-[11px] text-faint" style={{ borderTop: "1px solid var(--color-line)" }}>
+          <CopyButton text={raw} />
+          {turnInfo?.endOfTurn && turnInfo.elapsedSec != null && (
+            <span className="ml-auto inline-flex items-center gap-1"><Icon name="clock" size={11} /> turn took {fmtSec(turnInfo.elapsedSec)}</span>
+          )}
+        </div>
+      </div>
+    );
+  }
+  if (e.kind === "reasoning") return <div className="text-[11.5px] text-faint italic px-1 whitespace-pre-wrap">{(e as any).text}</div>;
+  if (e.kind === "status") return <div className="text-[11px] text-faint flex items-center gap-1.5"><Icon name="clock" size={11} /> {(e as any).status}{(e as any).text ? ` — ${(e as any).text}` : ""}</div>;
   if (e.kind === "usage") return null;
-  if (e.kind === "error") return <div className="text-[12.5px] rounded-lg px-3 py-2" style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>{e.text}</div>;
+  if (e.kind === "error") return <div className="text-[12.5px] rounded-lg px-3 py-2" style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>{(e as any).text}</div>;
   if (e.kind === "tool_call") {
-    const isBrowser = (e.tool || "").startsWith("browser_");
+    const isBrowser = ((e as any).tool || "").startsWith("browser_");
     return (
       <div className="flex items-start gap-2 text-[12px]">
         <span className="shrink-0 mt-0.5" style={{ color: isBrowser ? "#f5a623" : "#3b9eff" }}><Icon name={isBrowser ? "globe" : "wand"} size={13} /></span>
         <div className="min-w-0">
-          <span className="mono font-medium">{e.tool}</span>
-          {e.args != null && Object.keys(e.args as object).length > 0 && (
-            <span className="text-faint mono"> {JSON.stringify(e.args).slice(0, 160)}</span>
+          <span className="mono font-medium">{(e as any).tool}</span>
+          {(e as any).args != null && Object.keys((e as any).args as object).length > 0 && (
+            <span className="text-faint mono"> {JSON.stringify((e as any).args).slice(0, 160)}</span>
           )}
         </div>
       </div>
     );
   }
   if (e.kind === "tool_result") {
-    const txt = unwrap(e.result);
+    const txt = unwrap((e as any).result);
     return (
       <details className="text-[11.5px] ml-5">
-        <summary className="cursor-pointer select-none flex items-center gap-1.5" style={{ color: e.ok ? "#2bd576" : "#ff8d8d" }}>
-          <Icon name={e.ok ? "check" : "alert"} size={12} /> {e.ok ? "result" : "error"} <span className="text-faint">({txt.length} chars)</span>
+        <summary className="cursor-pointer select-none flex items-center gap-1.5" style={{ color: (e as any).ok ? "#2bd576" : "#ff8d8d" }}>
+          <Icon name={(e as any).ok ? "check" : "alert"} size={12} /> {(e as any).ok ? "result" : "error"} <span className="text-faint">({txt.length} chars)</span>
         </summary>
         <pre className="mono text-faint mt-1 whitespace-pre-wrap break-words" style={{ maxHeight: 200, overflow: "auto" }}>{txt}</pre>
       </details>

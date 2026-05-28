@@ -134,3 +134,34 @@ html[data-platform="darwin"] .sidebar-titlebar { padding-left: 0; padding-top: 0
    the main header's actions clear of them. */
 html[data-platform="win32"] .main-titlebar,
 html[data-platform="linux"] .main-titlebar { padding-right: 148px; }
+
+/* Markdown styling for agent messages — minimal, tasteful, dark-theme native.
+   Keeps the same density as plain message blocks while letting headings/lists/
+   code/tables/math read clearly. */
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child  { margin-bottom: 0; }
+.md p { margin: 0 0 0.6em; }
+.md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.25; margin: 1em 0 0.4em; }
+.md h1 { font-size: 1.35em; }
+.md h2 { font-size: 1.18em; }
+.md h3 { font-size: 1.05em; }
+.md h4 { font-size: 1em; }
+.md ul, .md ol { margin: 0 0 0.6em 1.2em; padding: 0; }
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
+.md li { margin: 0.15em 0; }
+.md li > p { margin: 0; }
+.md a { color: #3b9eff; text-decoration: underline; text-underline-offset: 2px; }
+.md a:hover { color: #6fb6ff; }
+.md blockquote { border-left: 3px solid var(--color-line); padding: 0.1em 0 0.1em 0.8em; color: var(--color-muted, #9aa0a6); margin: 0 0 0.6em; }
+.md hr { border: 0; border-top: 1px solid var(--color-line); margin: 1em 0; }
+.md code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; background: #161616; padding: 0.1em 0.35em; border-radius: 4px; }
+.md pre { background: #0e0e0e; border: 1px solid var(--color-line); border-radius: 8px; padding: 10px 12px; margin: 0 0 0.6em; overflow: auto; }
+.md pre code { background: transparent; padding: 0; border-radius: 0; font-size: 0.88em; line-height: 1.5; }
+.md table { border-collapse: collapse; margin: 0 0 0.6em; display: block; overflow-x: auto; }
+.md th, .md td { border: 1px solid var(--color-line); padding: 0.4em 0.7em; text-align: left; }
+.md th { background: #161616; font-weight: 600; }
+.md strong { font-weight: 600; }
+.md em { font-style: italic; }
+.md .katex { font-size: 1.02em; }
+.md .katex-display { overflow-x: auto; overflow-y: hidden; margin: 0.5em 0; }
