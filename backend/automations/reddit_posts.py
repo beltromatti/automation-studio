@@ -11,10 +11,9 @@ family), in priority order:
 
   1. A per-row ``message`` column on the input dataset (personalised per
      community — overrides everything).
-  2. A list of ``messages`` (param) to alternate round-robin across the
-     fallback posts actually published (a per-row message doesn't consume an
-     alternation slot).
-  3. A single ``message`` param.
+  2. The ``messages`` param: one message used for everyone, or several
+     separated by ``||`` to alternate round-robin across the posts actually
+     published (a per-row message doesn't consume an alternation slot).
 
 The message itself becomes the post's title + body, picked to read like a real
 human post:
@@ -156,31 +155,33 @@ def _community(row: dict) -> str:
 
 
 def _messages(params: dict) -> list[str]:
-    """Resolve the fallback message(s). ``messages`` (a JSON array, or items
-    separated by ``||`` or a ``---`` line) wins and is alternated round-robin;
-    otherwise the single ``message``. We strip surrounding whitespace only —
+    """Resolve the fallback message(s) from the single ``messages`` param: one
+    message to send to everyone, or several separated by ``||`` to rotate
+    round-robin across the posts actually published. A JSON array is also
+    accepted for programmatic callers. We strip surrounding whitespace only —
     embedded newlines stay (the body field preserves them and that's the right
     rendering for a Reddit post)."""
-    msgs: list[str] = []
     raw = params.get("messages")
-    if raw:
-        s = str(raw).strip()
-        if s[:1] == "[":
-            try:
-                msgs = [str(x) for x in json.loads(s)]
-            except (ValueError, TypeError):
-                msgs = []
-        if not msgs:
-            msgs = re.split(r"\s*\|\|\s*|\n?-{3,}\n?", s)
-    if not msgs and params.get("message"):
-        msgs = [str(params["message"])]
+    if not raw:
+        return []
+    s = str(raw).strip()
+    if not s:
+        return []
+    msgs: list[str] = []
+    if s[:1] == "[":
+        try:
+            msgs = [str(x) for x in json.loads(s)]
+        except (ValueError, TypeError):
+            msgs = []
+    if not msgs:
+        msgs = s.split("||")
     return [m.strip() for m in msgs if m and m.strip()]
 
 
 def _row_message(row: dict) -> str:
     """A per-recipient message carried on the input row (a ``message`` column on
-    the dataset). When present it OVERRIDES both the ``message`` and ``messages``
-    params, so each community can get a bespoke post."""
+    the dataset). When present it OVERRIDES the ``messages`` param entirely, so
+    each community can get a bespoke post."""
     for k in ("message", "messaggio", "msg", "body", "post"):
         if row.get(k) and str(row[k]).strip():
             return str(row[k]).strip()
@@ -464,8 +465,8 @@ async def run(params, sess, inputs):
     fallback = _messages(params)
     n_personalised = sum(1 for r in inputs if _row_message(r))
     if not fallback and not n_personalised:
-        userkit.error("no message — provide a 'message'/'messages' param, "
-                      "or a 'message' column in the input")
+        userkit.error("no message — provide a 'messages' param (use || to separate "
+                      "variants), or a 'message' column in the input")
         return [{"community": _community(r) or str(r.get("community") or ""),
                  "post_url": "", "status": "error", "detail": "no message configured"}
                 for r in inputs]

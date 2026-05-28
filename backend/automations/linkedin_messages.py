@@ -4,10 +4,11 @@ Consumes a dataset of LinkedIn profiles (a ``profile_url`` per row — the exact
 shape the *LinkedIn People* / *LinkedIn Connections* workflows output, so the three
 chain directly) and, one profile at a time, human-paced, sends a direct message —
 **but only to people you are actually 1st-degree connected to**. The message can be
-set three ways, in priority order: a per-row ``message`` column in the input dataset
-(personalized per recipient — overrides everything), else a list of ``messages`` to
-alternate (round-robin across the fallback messages actually sent), else a single
-``message`` param. Output = the input list with a ``status`` (and ``detail``) column.
+set two ways, in priority order: a per-row ``message`` column in the input dataset
+(personalized per recipient — overrides everything), else the ``messages`` param
+(one message for everyone, or several separated by ``||`` to alternate round-robin
+across the fallback messages actually sent). Output = the input list with a
+``status`` (and ``detail``) column.
 
 Built to be resilient to everything a logged-in LinkedIn session does, learned by
 driving real profiles by hand (the same way [[linkedin_connections]] was):
@@ -79,30 +80,32 @@ def _profile_url(row: dict) -> str:
 
 
 def _messages(params: dict) -> list[str]:
-    """Resolve the message(s) to send. ``messages`` (a JSON array, or items separated
-    by ``||`` or a ``---`` line) takes precedence and is alternated round-robin; else
-    the single ``message``. Whitespace/newlines are collapsed so a stray newline can't
-    submit the compose early."""
-    msgs: list[str] = []
+    """Resolve the fallback message(s) from the single ``messages`` param: one
+    message to send to everyone, or several separated by ``||`` to rotate
+    round-robin across the messages actually sent. A JSON array is also
+    accepted for programmatic callers. Whitespace/newlines are collapsed so a
+    stray newline can't submit the compose early."""
     raw = params.get("messages")
-    if raw:
-        s = str(raw).strip()
-        if s[:1] == "[":
-            try:
-                msgs = [str(x) for x in json.loads(s)]
-            except (ValueError, TypeError):
-                msgs = []
-        if not msgs:
-            msgs = re.split(r"\s*\|\|\s*|\n?-{3,}\n?", s)
-    if not msgs and params.get("message"):
-        msgs = [str(params["message"])]
+    if not raw:
+        return []
+    s = str(raw).strip()
+    if not s:
+        return []
+    msgs: list[str] = []
+    if s[:1] == "[":
+        try:
+            msgs = [str(x) for x in json.loads(s)]
+        except (ValueError, TypeError):
+            msgs = []
+    if not msgs:
+        msgs = s.split("||")
     return [re.sub(r"\s+", " ", m).strip() for m in msgs if m and m.strip()]
 
 
 def _row_message(row: dict) -> str:
-    """A per-recipient message carried on the input row (a ``message`` column in the
-    dataset). When present it OVERRIDES both the single ``message`` param and the
-    ``messages``-to-alternate param, so each person can get a bespoke message."""
+    """A per-recipient message carried on the input row (a ``message`` column in
+    the dataset). When present it OVERRIDES the ``messages`` param entirely, so
+    each person can get a bespoke message."""
     for k in ("message", "messaggio", "msg"):
         if row.get(k):
             return re.sub(r"\s+", " ", str(row[k])).strip()
@@ -406,12 +409,12 @@ async def process_profile(sess, url: str, message: str) -> tuple[str, str, str]:
 # ---- run ---------------------------------------------------------------------
 async def run(params, sess, inputs):
     # message resolution per row: a ``message`` column on the row (personalized) wins;
-    # otherwise the ``message``/``messages`` params (a single message, or several to
-    # alternate round-robin across the FALLBACK messages actually sent).
+    # otherwise the ``messages`` param (one message for everyone, or several
+    # separated by ``||`` to alternate round-robin across the FALLBACK sends).
     fallback = _messages(params)
     n_personalized = sum(1 for r in inputs if _row_message(r))
     if not fallback and not n_personalized:
-        userkit.error("no message — provide a 'message'/'messages' param, or a 'message' column in the input")
+        userkit.error("no message — provide a 'messages' param (use || to separate variants), or a 'message' column in the input")
         return [{"profile_url": _profile_url(r) or str(r.get("profile_url") or ""),
                  "name": str(r.get("name") or ""), "status": "error", "detail": "no message configured"}
                 for r in inputs]

@@ -235,18 +235,14 @@ WORKFLOWS: list[WorkflowDef] = [
         profile_name="c9c42d740f",
         needs_auth=True,
         params=[
-            WorkflowParam("message", "Message", "string",
+            WorkflowParam("messages", "Message", "string",
                           placeholder="Ciao! Sono uno studente del Politecnico di Milano…",
                           help="The post for each community. The title is auto-derived (the first "
                                "sentence, or the whole message if short); the body is the full message. "
-                               "Use a blank line (\\n\\n) to force an explicit title/body split. "
-                               "Overridden per-community by a 'message' column in the input dataset, "
-                               "if present."),
-            WorkflowParam("messages", "Messages to alternate", "string", default="",
-                          help="Optional. Several messages to rotate through (round-robin across the "
-                               "posts actually published) — separate them with || (or paste a JSON "
-                               "array). When set, this overrides the single Message above (but a per-row "
-                               "'message' column still wins)."),
+                               "Use a blank line to force an explicit title/body split. To rotate "
+                               "between several variants round-robin, separate them with || in this "
+                               "same field. Overridden per-community by a 'message' column in the "
+                               "input dataset, if present."),
             WorkflowParam("maxPosts", "Max posts this run", "number", default=0,
                           help="Safety cap on how many posts to actually publish (0 = no cap). "
                                "Invalid / not-found / restricted / flair-required communities don't count."),
@@ -271,14 +267,12 @@ WORKFLOWS: list[WorkflowDef] = [
         profile_name="default",
         needs_auth=True,
         params=[
-            WorkflowParam("message", "Message", "string", placeholder="Ciao! Volevo mettermi in contatto…",
-                          help="The message to send to each connection. Keep it human and simple. "
-                               "Overridden per-recipient by a 'message' column in the input dataset, if present."),
-            WorkflowParam("messages", "Messages to alternate", "string", default="",
-                          help="Optional. Several messages to rotate through (round-robin across the "
-                               "messages actually sent) — separate them with || (or paste a JSON array). "
-                               "When set, this overrides the single Message above (but a per-row 'message' "
-                               "column still wins)."),
+            WorkflowParam("messages", "Message", "string",
+                          placeholder="Ciao! Volevo mettermi in contatto…",
+                          help="The message to send to each connection — keep it human and simple. "
+                               "To rotate between several variants round-robin, separate them with || "
+                               "in this same field. Overridden per-recipient by a 'message' column in "
+                               "the input dataset, if present."),
             WorkflowParam("maxMessages", "Max messages this run", "number", default=0,
                           help="Safety cap on how many messages to actually send (0 = no cap). "
                                "Non-connections / pending / can't-message profiles don't count."),
