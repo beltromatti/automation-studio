@@ -10,7 +10,7 @@ import { CaptureToDataset } from "@/components/CaptureToDataset";
 import { RunControls } from "@/components/RunControls";
 import { useRuns } from "@/components/RunsProvider";
 import { jget, duration, timeAgo, untilTime } from "@/lib/client";
-import type { Run } from "@/lib/types";
+import type { ColumnType, PublicWorkflow, Run } from "@/lib/types";
 
 const ACTIVE = ["running", "starting", "controlled"];
 const isEphemeral = (id: string) => id === "ephemeral" || id === "temporary" || !id;
@@ -20,6 +20,7 @@ export default function RunDetail() {
   const { runs: allRuns } = useRuns();
   const [run, setRun] = useState<Run | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [columnTypes, setColumnTypes] = useState<Record<string, ColumnType>>({});
   const liveRef = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -44,6 +45,19 @@ export default function RunDetail() {
     document.addEventListener("visibilitychange", onVis);
     return () => { stop = true; document.removeEventListener("visibilitychange", onVis); };
   }, [refresh]);
+
+  // Look up the workflow's output_contract once so the results table can render
+  // `file` / `file_list` cells as thumbnails (CsvTable falls back to plain text
+  // when no types are passed, which is fine for older workflows).
+  useEffect(() => {
+    if (!run?.workflowId) return;
+    jget<{ workflows: PublicWorkflow[] }>("/api/workflows").then((d) => {
+      const w = d.workflows.find((x) => x.id === run.workflowId);
+      const map: Record<string, ColumnType> = {};
+      for (const c of (w?.outputContract ?? [])) map[c.name] = c.type as ColumnType;
+      setColumnTypes(map);
+    }).catch(() => {});
+  }, [run?.workflowId]);
 
   if (!run) return (<><Header title="…" /><div className="px-7 py-6 text-faint text-[13px]">Loading run…</div></>);
 
@@ -136,7 +150,7 @@ export default function RunDetail() {
                 <div className="ml-auto"><CaptureToDataset runId={run.id} defaultName={`${run.workflowName} — ${run.id}`} /></div>
               )}
             </div>
-            <CsvTable runId={run.id} />
+            <CsvTable runId={run.id} columnTypes={columnTypes} />
           </div>
         )}
       </div>

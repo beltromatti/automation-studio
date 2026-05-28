@@ -1,11 +1,16 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Icon } from "./Icon";
+import { FileChip, FileChipList, parseFileList } from "./FilePreview";
 import { jget, downloadUrl } from "@/lib/client";
+import type { ColumnType } from "@/lib/types";
 
 interface Result { columns: string[]; rows: Record<string, string>[]; count: number }
 
-export function CsvTable({ runId }: { runId: string }) {
+// `columnTypes` (optional): per-column type from the workflow's output_contract,
+// used to render `file` / `file_list` cells as thumbnails instead of raw ids.
+// Missing entries default to plain-text rendering — fully backward-compatible.
+export function CsvTable({ runId, columnTypes }: { runId: string; columnTypes?: Record<string, ColumnType> }) {
   const [data, setData] = useState<Result | null>(null);
   const [error, setError] = useState("");
   const [q, setQ] = useState("");
@@ -77,15 +82,23 @@ export function CsvTable({ runId }: { runId: string }) {
           <tbody>
             {rows.map((row, i) => (
               <tr key={i} className="border-b hover:bg-elevated/40" style={{ borderColor: "#171717" }}>
-                {data.columns.map((c) => (
-                  <td key={c} className="px-3 py-2 align-top" style={{ maxWidth: 360 }}>
-                    {isUrl(row[c]) ? (
-                      <a href={row[c]} target="_blank" rel="noreferrer" className="text-running hover:underline break-all">{row[c]}</a>
-                    ) : (
-                      <span className="text-fg/90 break-words">{row[c]}</span>
-                    )}
-                  </td>
-                ))}
+                {data.columns.map((c) => {
+                  const v = row[c];
+                  const t = columnTypes?.[c];
+                  return (
+                    <td key={c} className="px-3 py-2 align-top" style={{ maxWidth: 360 }}>
+                      {t === "file" ? (
+                        v ? <FileChip id={String(v)} /> : <span className="text-faint">—</span>
+                      ) : t === "file_list" ? (
+                        <FileChipList ids={parseFileList(v)} />
+                      ) : isUrl(v) ? (
+                        <a href={v} target="_blank" rel="noreferrer" className="text-running hover:underline break-all">{v}</a>
+                      ) : (
+                        <span className="text-fg/90 break-words">{v}</span>
+                      )}
+                    </td>
+                  );
+                })}
               </tr>
             ))}
           </tbody>

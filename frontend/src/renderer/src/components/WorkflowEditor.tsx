@@ -102,7 +102,7 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
               <input className="input" style={{ height: 30, width: 130 }} placeholder="name" value={p.name} onChange={(e) => setP(i, "name", e.target.value)} />
               <input className="input" style={{ height: 30, flex: 1 }} placeholder="label" value={p.label ?? ""} onChange={(e) => setP(i, "label", e.target.value)} />
               <select className="input appearance-none" style={{ height: 30, width: 110 }} value={p.type} onChange={(e) => setP(i, "type", e.target.value as ParamType)}>
-                <option value="string">string</option><option value="number">number</option><option value="boolean">boolean</option><option value="select">select</option>
+                <option value="string">string</option><option value="number">number</option><option value="boolean">boolean</option><option value="select">select</option><option value="file">file</option><option value="file_list">file_list</option>
               </select>
               <input className="input" style={{ height: 30, width: 120 }} placeholder="default" value={String(p.default ?? "")} onChange={(e) => setP(i, "default", e.target.value)} />
               <button className="btn btn-secondary btn-sm" onClick={() => setParams((ps) => ps.filter((_, j) => j !== i))}><Icon name="x" size={12} /></button>
@@ -116,8 +116,8 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
           {contract.map((c, i) => (
             <span key={i} className="flex items-center gap-1 card px-1.5 py-1">
               <input className="input" style={{ height: 26, width: 110 }} placeholder="name" value={c.name} onChange={(e) => setC(i, "name", e.target.value)} />
-              <select className="input appearance-none" style={{ height: 26, width: 86 }} value={c.type} onChange={(e) => setC(i, "type", e.target.value)}>
-                <option value="text">text</option><option value="number">number</option><option value="boolean">boolean</option>
+              <select className="input appearance-none" style={{ height: 26, width: 86 }} value={c.type} onChange={(e) => setC(i, "type", e.target.value as ColumnType)}>
+                <option value="text">text</option><option value="number">number</option><option value="boolean">boolean</option><option value="file">file</option><option value="file_list">file_list</option>
               </select>
               <button className="text-faint hover:text-fg" onClick={() => setContract((cs) => cs.filter((_, j) => j !== i))}><Icon name="x" size={11} /></button>
             </span>
@@ -130,6 +130,10 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
           {inputC.map((c, i) => (
             <span key={i} className="flex items-center gap-1 card px-1.5 py-1">
               <input className="input" style={{ height: 26, width: 110 }} placeholder="name" value={c.name} onChange={(e) => setInputC((cs) => cs.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))} />
+              <select className="input appearance-none" style={{ height: 26, width: 86 }} value={c.type}
+                      onChange={(e) => setInputC((cs) => cs.map((x, j) => (j === i ? { ...x, type: e.target.value as ColumnType } : x)))}>
+                <option value="text">text</option><option value="number">number</option><option value="boolean">boolean</option><option value="file">file</option><option value="file_list">file_list</option>
+              </select>
               <button className="text-faint hover:text-fg" onClick={() => setInputC((cs) => cs.filter((_, j) => j !== i))}><Icon name="x" size={11} /></button>
             </span>
           ))}

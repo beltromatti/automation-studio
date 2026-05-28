@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
-import { FileChip, FileChipList, parseFileList } from "@/components/FilePreview";
+import { FileCellEditor } from "@/components/FilePreview";
 import { jget, jpost, jdel, downloadUrl } from "@/lib/client";
 import type { ColumnType, Dataset, DatasetColumn, DatasetRows } from "@/lib/types";
 
@@ -232,10 +232,9 @@ export default function DatasetPage() {
                                    onChange={(e) => setDraft(e.target.value)} onBlur={commitCell}
                                    onClick={(e) => e.stopPropagation()}
                                    onKeyDown={(e) => { if (e.key === "Enter") commitCell(); if (e.key === "Escape") setEdit(null); }} />
-                          ) : isFile ? (
-                            val ? <FileChip id={String(val)} /> : <span className="text-faint">—</span>
-                          ) : isFileList ? (
-                            <FileChipList ids={parseFileList(val)} />
+                          ) : isFile || isFileList ? (
+                            <FileCellEditor datasetId={id!} rid={row._rid} column={c.display}
+                                            multiple={isFileList} value={val} onSaved={reload} />
                           ) : isUrl(val) ? (
                             <a href={String(val)} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="text-running hover:underline break-all">{String(val)}</a>
                           ) : (
