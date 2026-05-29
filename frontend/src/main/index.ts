@@ -148,7 +148,7 @@ async function createWindow() {
     // draggable) — see the renderer's title-bar styles.
     titleBarStyle: isMac ? "hiddenInset" : "hidden",
     ...(isMac
-      ? { trafficLightPosition: { x: 18, y: 22 } }
+      ? { trafficLightPosition: { x: 14, y: 14 } }
       : { titleBarOverlay: { color: "#0a0a0a", symbolColor: "#ededed", height: 60 } }),
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),

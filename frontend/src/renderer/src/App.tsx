@@ -16,9 +16,14 @@ import AgentSessionPage from "@/pages/AgentSessionPage";
 export default function App() {
   return (
     <RunsProvider>
-      <div className="flex h-screen">
+      <div className="flex h-screen bg-bg">
         <Sidebar />
-        <main className="flex-1 overflow-y-auto">
+        {/* Linear-style floating panel: the sidebar sits on the black app background,
+            and the content "rests" on top of it — inset on every side, rounded, bordered.
+            This wrapper supplies the margins; <main> stays the scroll container with a
+            definite height so pages relying on h-full keep working unchanged. */}
+        <div className="flex-1 min-w-0 p-2 pt-[48px]">
+          <main className="app-panel h-full overflow-y-auto">
           <Routes>
             <Route path="/" element={<Overview />} />
             <Route path="/workflows/:id" element={<WorkflowPage />} />
@@ -32,7 +37,8 @@ export default function App() {
             <Route path="/data/:id" element={<DatasetPage />} />
             <Route path="/profiles" element={<ProfilesPage />} />
           </Routes>
-        </main>
+          </main>
+        </div>
       </div>
     </RunsProvider>
   );

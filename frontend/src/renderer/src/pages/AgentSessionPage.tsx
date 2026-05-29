@@ -158,7 +158,7 @@ export default function AgentSessionPage() {
       </div>
 
       {/* message bar — fixed bottom. Steer while running, or reactivate a rested session. */}
-      <div className="shrink-0 border-t px-7 py-3 bg-bg" style={{ borderColor: "var(--color-line)" }}>
+      <div className="shrink-0 border-t px-7 py-3 bg-panel" style={{ borderColor: "var(--color-line)" }}>
         <div className="max-w-[1000px]">
           {!inFlight && (
             <div className="text-[11px] text-faint mb-1.5 flex items-center gap-1.5">
