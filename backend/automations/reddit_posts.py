@@ -66,6 +66,12 @@ Hard-won realities, learned by submitting real posts by hand:
   button while ``page.expect_file_chooser()`` is open, then provides the
   files. Reddit renders ``blob:`` previews — we poll for the right preview
   count before considering the upload landed.
+* **The body field is labelled differently per post type** — "Post body text
+  field" on a Text post, "Optional Body text field" on an Images & Video post.
+  When the message has a body part it MUST land: if the body field can't be
+  found, or stays empty after typing, we return ``body_failed`` and DON'T
+  publish — a media post that silently dropped its body is the exact bug this
+  guards against (all-or-nothing, like media).
 * **Success signal is a URL transition.** After Send, Reddit navigates AWAY
   from ``/submit/`` — typically straight to the new post at
   ``/r/<community>/comments/<id>/<slug>/``, from which we return ``post_url``.
@@ -246,28 +252,39 @@ def _resolve_media(params: dict, row: dict) -> list[dict]:
     raw = params.get("media")
     if not raw:
         return []
-    if isinstance(raw, list):
+    # Already-expanded list of file-record dicts (orchestrator preserves these).
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
         return [m for m in raw if isinstance(m, dict) and m.get("path")]
     if isinstance(raw, dict) and raw.get("path"):
         return [raw]
-    # The orchestrator expands param-file values for us; if the agent passed a
-    # bare id/array, resolve via the file store directly.
+    # Otherwise we have id(s) to resolve via the file store. Accept ALL the
+    # shapes an agent/UI realistically sends: a list of id strings
+    # (["754e0fea"]), a single id string ("754e0fea"), or a JSON-array string
+    # ('["754e0fea"]'). (The earlier code only handled list-of-dicts, so a bare
+    # list of id strings silently resolved to no media → a text-only post.)
+    ids: list[str] = []
+    if isinstance(raw, list):
+        ids = [str(x).strip() for x in raw if str(x).strip()]
+    else:
+        s = str(raw).strip()
+        if s[:1] == "[":
+            try:
+                ids = [str(x).strip() for x in json.loads(s) if str(x).strip()]
+            except (ValueError, TypeError):
+                ids = []
+        elif s:
+            ids = [s]
+    if not ids:
+        return []
     try:
         from orchestrator import files as _files
     except ImportError:
         return []
     out: list[dict] = []
-    items = raw if isinstance(raw, list) else [raw]
-    for it in items:
-        if isinstance(it, str):
-            try:
-                items_parsed = json.loads(it) if it.strip().startswith("[") else [it]
-            except ValueError:
-                items_parsed = [it]
-            for ii in items_parsed:
-                rec = _files.get(str(ii).strip()) if str(ii).strip() else None
-                if rec:
-                    out.append(rec)
+    for fid in ids:
+        rec = _files.get(fid)
+        if rec:
+            out.append(rec)
     return out
 
 
@@ -420,7 +437,9 @@ def _find_form(nodes: list) -> dict:
 
     * Title — a ``<textarea>`` whose name is "title" (the form label).
     * Body  — a ``<div role="textbox">`` whose name contains "post body"
-      (label is "Post body text field" on Text and Images & Video forms).
+      (label is "Post body text field" on a Text post, but "Optional Body text
+      field" on an Images & Video post — match BOTH, plus a generic "body text"
+      fallback, else a media post silently loses its body).
     * Post  — a ``<button>`` whose name is exactly "Post" (rejects "Save Draft"
       and the per-tool toolbar buttons).
     * Upload — a ``<button>`` named "Upload files" (only present on the
@@ -432,9 +451,15 @@ def _find_form(nodes: list) -> dict:
     (any value may be None if not yet rendered)."""
     title = next((n for n in nodes if n.get("tag") == "textarea"
                   and _name(n).lower() == "title"), None)
-    body = next((n for n in nodes if n.get("tag") == "div"
-                 and _attrs(n).get("role") == "textbox"
-                 and "post body" in _name(n).lower()), None)
+    # Both the Text-tab and the Images&Video-tab body textbox can be in the DOM;
+    # observe usually prunes the hidden one, but if both surface prefer the
+    # in-viewport (active) one so we never type into the hidden twin.
+    body_matches = [n for n in nodes if n.get("tag") == "div"
+                    and _attrs(n).get("role") == "textbox"
+                    and any(s in _name(n).lower() for s in
+                            ("post body", "optional body", "body text"))]
+    body = next((n for n in body_matches if n.get("inViewport")), None) or \
+        (body_matches[0] if body_matches else None)
     post = next((n for n in nodes if n.get("tag") == "button"
                  and _name(n).lower() == "post"), None)
     upload = next((n for n in nodes if n.get("tag") == "button"
@@ -445,6 +470,45 @@ def _find_form(nodes: list) -> dict:
     image_tab_disabled = bool(image_tab and _is_disabled(image_tab))
     return {"title": title, "body": body, "post": post, "upload": upload,
             "image_tab": image_tab, "image_tab_disabled": image_tab_disabled}
+
+
+async def _body_filled(sess, expected: str) -> bool:
+    """Confirm the post-body contenteditable actually holds our text before we
+    click Post. The body is a light-DOM ``div[role=textbox]`` whose aria label
+    contains 'body' (e.g. 'Post body text field' / 'Optional Body text field');
+    we read its innerText and require a meaningful prefix of the body to be
+    present (collapsing whitespace so newline rendering differences don't fail
+    the check). Defensive: any read error returns True so we don't block a
+    legitimate post on a transient eval hiccup."""
+    want = " ".join((expected or "").split())[:40].lower()
+    if not want:
+        return True
+    # The Images & Video form keeps BOTH the Text-tab body ("Post body text
+    # field") and the active media-tab body ("Optional Body text field") in the
+    # DOM — the inactive one is hidden (offsetParent === null, zero-size). Read
+    # only VISIBLE body textbox(es) and take the one with the most content, so
+    # we verify the field we actually typed into, not the hidden empty twin.
+    js = r"""() => {
+      const boxes = document.querySelectorAll('div[role="textbox"]');
+      let best = '';
+      for (const b of boxes) {
+        const lbl = ((b.getAttribute('aria-label') || '') + ' ' +
+                     (b.getAttribute('aria-placeholder') || '')).toLowerCase();
+        if (lbl.indexOf('body') === -1) continue;
+        if (b.offsetParent === null) continue;            // hidden (inactive tab)
+        const r = b.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;     // zero-size
+        const t = b.innerText || b.textContent || '';
+        if (t.length > best.length) best = t;
+      }
+      return best;
+    }"""
+    try:
+        txt = await sess.evaluate(js)
+        got = " ".join(str(txt or "").split()).lower()
+        return want in got
+    except Exception:
+        return True
 
 
 async def _media_preview_count(sess) -> int:
@@ -610,13 +674,28 @@ async def process_community(sess, community: str, message: str,
             return "post_failed", "", "title textarea vanished after media upload"
         await sess.type(int(form["title"]["index"]), title, clear=True)
         await sess.sleep(random.randint(250, 500))
-        # body is OPTIONAL — only type into it when we actually have body text
-        # AND the body textbox rendered. A short title-only post stays clean.
+        # Body is optional ONLY when the message has no body part. When we DO
+        # have body text, it MUST land — never publish a title-only post that
+        # silently dropped the body (the media-post form labels the body
+        # "Optional Body text field", which an out-of-date selector missed,
+        # so posts went out body-less and didn't fail). All-or-nothing.
         if body:
             nodes = await _nodes(sess)
             form = _find_form(nodes)
-            if form["body"] is not None:
-                await sess.type(int(form["body"]["index"]), body, clear=True)
+            if form["body"] is None:
+                return ("body_failed", "",
+                        "post body field not found — refusing to publish a body-less post")
+            await sess.type(int(form["body"]["index"]), body, clear=True)
+            await sess.sleep(random.randint(300, 600))
+            # Verify the body actually registered in the contenteditable before
+            # we commit (a click that didn't focus, an editor that swallowed the
+            # text, etc. would otherwise publish an empty body silently).
+            if not await _body_filled(sess, body):
+                # one more beat for the editor to settle, then re-check
+                await sess.sleep(900)
+                if not await _body_filled(sess, body):
+                    return ("body_failed", "",
+                            "post body stayed empty after typing — refusing to publish a body-less post")
     except Exception as e:
         return "post_failed", "", f"type failed: {str(e)[:120]}"
 
