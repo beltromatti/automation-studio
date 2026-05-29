@@ -74,7 +74,7 @@ Three specialists ship built-in:
 
 - 🛠️ **Studio Agent** — the complete operator. Builds & runs workflows, shapes the data layer, drives the browser, schedules work. Point it at anything.
 - 💼 **LinkedIn Specialist** — deep LinkedIn mastery: the search→connect→message pipeline plus live navigation, fluent in all of LinkedIn's quirks.
-- 📈 **Growth Strategist** — a B2B lead-gen & GTM partner. It *interviews you* to nail your ideal customer, then builds a real, scored, deduped lead pipeline, runs the outreach, and advises on positioning and strategy.
+- 📈 **Client Acquisition Lead** — a B2B business-development partner. It sharpens your ideal customer, finds prospects across LinkedIn, Google/Maps, websites, directories and niche sources, enriches them with verified contact paths, runs approved multi-channel outreach and follow-up, and advises on sales strategy.
 
 Roll your own in seconds: give an agent a name, a personality/skill prompt, and a toolset — it's ready to launch.
 
