@@ -70,11 +70,12 @@ Out of the box, with the **LinkedIn growth suite** as the flagship — three wor
 
 Agents are the headline act. They run on **your own [Claude Code](https://claude.com/claude-code) or [Codex](https://openai.com/codex/) CLI** — your existing subscription, **no API keys, nothing extra to pay**. They act through the same tools you do (workflows, the data layer, and the live browser), so they can genuinely *operate* the studio, not just chat about it.
 
-Three specialists ship built-in:
+Four specialists ship built-in:
 
 - 🛠️ **Studio Agent** — the complete operator. Builds & runs workflows, shapes the data layer, drives the browser, schedules work. Point it at anything.
 - 💼 **LinkedIn Specialist** — deep LinkedIn mastery: the search→connect→message pipeline plus live navigation, fluent in all of LinkedIn's quirks.
 - 📈 **Client Acquisition Lead** — a B2B business-development partner. It sharpens your ideal customer, finds prospects across LinkedIn, Google/Maps, websites, directories and niche sources, enriches them with verified contact paths, runs approved multi-channel outreach and follow-up, and advises on sales strategy.
+- 📣 **Social Growth Lead** — a social media growth operator. It plans organic or paid distribution across LinkedIn, Reddit, X, Instagram, TikTok, Facebook and niche communities, publishes approved channel-native content, monitors real traffic and engagement metrics, and keeps iterating over hours or days.
 
 Roll your own in seconds: give an agent a name, a personality/skill prompt, and a toolset — it's ready to launch.
 
