@@ -241,6 +241,36 @@ def _col_map(ds_id: str) -> dict[str, dict]:
     return {c["display"].strip().lower(): c for c in _columns(ds_id)}
 
 
+def _normalize_rows(rows: Any) -> list[dict]:
+    """Validate incoming row payloads before touching SQLite.
+
+    Agents occasionally produce JSON that satisfies a loose ``array`` schema but
+    is semantically wrong, e.g. ``["r/python", "r/SaaS"]`` instead of
+    ``[{"subreddit": "r/python"}, {"subreddit": "r/SaaS"}]``. Reject that with
+    a clear ValueError so the HTTP API returns a 400/tool error instead of an
+    ASGI traceback, and so we never guess which column primitive values belong in.
+    """
+    if rows is None:
+        return []
+    if isinstance(rows, str):
+        s = rows.strip()
+        try:
+            rows = json.loads(s) if s else []
+        except ValueError:
+            raise ValueError("rows must be an array of objects (got a string that isn't JSON)")
+    if not isinstance(rows, (list, tuple)):
+        raise ValueError("rows must be an array of objects keyed by dataset column name")
+    out: list[dict] = []
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            raise ValueError(
+                f"rows[{i}] must be an object keyed by column name, got {type(r).__name__}; "
+                "example: [{'Name': 'Acme', 'Website': 'https://acme.example'}]"
+            )
+        out.append(dict(r))
+    return out
+
+
 # ---------------------------------------------------------------------- CRUD
 def list_datasets() -> list[dict]:
     with _lock:
@@ -256,12 +286,13 @@ def get_dataset(ds_id: str) -> dict | None:
 
 def create_dataset(name: str, columns: list[dict | str] | None = None,
                    dedup_keys: list[str] | None = None, source: Any = None,
-                   rows: list[dict] | None = None) -> dict:
+                   rows: Any = None) -> dict:
     with _lock:
         c = _db()
         ds_id = _new_id()
         table = f"ds_{ds_id}"
         cols = _normalize_columns(columns or [])
+        initial_rows = _normalize_rows(rows)
         defs = ['"_rid" INTEGER PRIMARY KEY AUTOINCREMENT', '"_added_at" REAL']
         defs += [f'{_q(col["name"])} {_AFFINITY[col["type"]]}' for col in cols]
         c.execute(f"CREATE TABLE {_q(table)} ({', '.join(defs)})")
@@ -278,8 +309,8 @@ def create_dataset(name: str, columns: list[dict | str] | None = None,
                 (ds_id, ordinal, col["display"], col["name"], col["type"]),
             )
         c.commit()
-        if rows:
-            append_rows(ds_id, rows, dedup=False)
+        if initial_rows:
+            append_rows(ds_id, initial_rows, dedup=False)
         return get_dataset(ds_id)  # type: ignore[return-value]
 
 
@@ -426,11 +457,12 @@ def get_rows(ds_id: str, limit: int = 200, offset: int = 0, search: str = "",
         return {"columns": cols, "rows": out, "count": total}
 
 
-def append_rows(ds_id: str, rows: list[dict], dedup: bool = True, extend: bool = False) -> dict:
+def append_rows(ds_id: str, rows: Any, dedup: bool = True, extend: bool = False) -> dict:
     """Append incoming rows (keyed by *display* name, case-insensitive). When the
     dataset declares dedup keys and ``dedup`` is on, rows whose key already exists
     (or repeats within this batch) are skipped. With ``extend`` new incoming
     columns are added to the dataset schema (text)."""
+    rows = _normalize_rows(rows)
     with _lock:
         row = _get_row(ds_id)
         if not row:
@@ -483,7 +515,7 @@ def append_rows(ds_id: str, rows: list[dict], dedup: bool = True, extend: bool =
         return {"inserted": inserted, "skipped": skipped}
 
 
-def insert_row(ds_id: str, values: dict) -> dict:
+def insert_row(ds_id: str, values: Any) -> dict:
     return append_rows(ds_id, [values], dedup=False)
 
 

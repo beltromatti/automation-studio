@@ -139,12 +139,29 @@ def t_dataset_rows(a):
 
 
 def t_dataset_create(a):
+    err = _rows_arg_error(a.get("rows"))
+    if err:
+        return err
     return _api("POST", "/api/datasets", {"name": a["name"], "columns": a.get("columns", []),
                                           "rows": a.get("rows"), "dedupKeys": a.get("dedupKeys"),
                                           "source": {"kind": "manual"}})
 
 
+def _rows_arg_error(rows) -> dict | None:
+    if rows is None:
+        return None
+    if not isinstance(rows, list):
+        return {"error": "rows must be a list of objects, e.g. [{'Name': 'Acme'}]"}
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            return {"error": f"rows[{i}] must be an object keyed by column name, got {type(row).__name__}"}
+    return None
+
+
 def t_dataset_append(a):
+    err = _rows_arg_error(a.get("rows"))
+    if err:
+        return err
     return _api("POST", f"/api/datasets/{a['datasetId']}/rows",
                 {"rows": a["rows"], "dedup": a.get("dedup", True), "extend": a.get("extend", True)})
 
@@ -983,11 +1000,11 @@ STUDIO_TOOLS = [
     ("studio_dataset_rows", "Read rows from a dataset (paginated, optional text search).",
      {"type": "object", "properties": {"datasetId": {"type": "string"}, "limit": {"type": "integer"},
                                        "offset": {"type": "integer"}, "search": {"type": "string"}}, "required": ["datasetId"]}, t_dataset_rows),
-    ("studio_dataset_create", "Create a new dataset — optionally populated in the same call. columns: [{name,type}] where type is text|number|boolean (SQL-ish aliases like integer/real/float map to number, so numeric columns sort/aggregate correctly and string values are coerced to numbers). rows: [{colName: value}] to insert immediately. dedupKeys: column display names.",
+    ("studio_dataset_create", "Create a new dataset — optionally populated in the same call. columns: [{name,type}] where type is text|number|boolean (SQL-ish aliases like integer/real/float map to number, so numeric columns sort/aggregate correctly and string values are coerced to numbers). rows MUST be a list of objects keyed by column display name, e.g. [{\"Subreddit\":\"r/SaaS\",\"Post URL\":\"https://...\"}]. dedupKeys: column display names.",
      {"type": "object", "properties": {"name": {"type": "string"}, "columns": {"type": "array"},
-                                       "rows": {"type": "array"}, "dedupKeys": {"type": "array"}}, "required": ["name"]}, t_dataset_create),
+                                       "rows": {"type": "array", "items": {"type": "object"}}, "dedupKeys": {"type": "array", "items": {"type": "string"}}}, "required": ["name"]}, t_dataset_create),
     ("studio_dataset_append", "Append rows (list of objects keyed by column name) to a dataset; dedups by the dataset's keys and extends the schema for new columns.",
-     {"type": "object", "properties": {"datasetId": {"type": "string"}, "rows": {"type": "array"},
+     {"type": "object", "properties": {"datasetId": {"type": "string"}, "rows": {"type": "array", "items": {"type": "object"}},
                                        "dedup": {"type": "boolean"}, "extend": {"type": "boolean"}}, "required": ["datasetId", "rows"]}, t_dataset_append),
     ("studio_dataset_project", "Create a new dataset from selected/renamed columns of another (prep a tidy input for the next workflow). columns: [{from,to}] or [name].",
      {"type": "object", "properties": {"srcId": {"type": "string"}, "columns": {"type": "array"},

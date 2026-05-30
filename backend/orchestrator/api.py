@@ -330,10 +330,13 @@ def create_app() -> FastAPI:
 
     @app.post("/api/datasets/{did}/rows")
     async def dataset_add_rows(did: str, body: dict = Body(...)):
-        if "values" in body:
-            return datastore.insert_row(did, body["values"])
-        return datastore.append_rows(did, body.get("rows") or [], bool(body.get("dedup", True)),
-                                     bool(body.get("extend", False)))
+        try:
+            if "values" in body:
+                return datastore.insert_row(did, body["values"])
+            return datastore.append_rows(did, body.get("rows") or [], bool(body.get("dedup", True)),
+                                         bool(body.get("extend", False)))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
 
     @app.post("/api/datasets/{did}/cell")
     async def dataset_cell(did: str, body: dict = Body(...)):
