@@ -86,7 +86,7 @@ const TARGETS = {
     label: 'Linux x64',
     platform: 'linux',
     builderArgs: ['--linux', '--x64'],
-    artifactExts: ['.AppImage', '.blockmap'],
+    artifactExts: ['.appimage', '.blockmap'],
     artifactYmls: ['latest-linux.yml'],
   },
 }
