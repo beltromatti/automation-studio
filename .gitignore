@@ -19,6 +19,10 @@ frontend/release/
 frontend/resources/backend/
 frontend/resources/chromium/
 
+# Root build script output
+release/
+dist/
+
 # misc
 report.txt
 *.csv

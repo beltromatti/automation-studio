@@ -6,9 +6,10 @@ directories:
 files:
   - out/**/*
   - package.json
-# Shipped alongside the app (Contents/Resources/{backend,chromium} on macOS):
-#  - backend  = the frozen Python backend (orchestrator + humanbrowser + automations)
-#  - chromium = bundled patchright Chromium, used when no system Chrome is present
+# Shipped alongside the app (Contents/Resources/{backend,chromium,tray} on macOS,
+# equivalent paths on Windows / Linux):
+#   backend  — frozen Python backend (PyInstaller onedir)
+#   chromium — bundled patchright Chromium, fallback when no system Chrome present
 extraResources:
   - from: resources/backend
     to: backend
@@ -19,19 +20,25 @@ extraResources:
   - from: resources/icon.png
     to: icon.png
 asar: true
-# the frozen backend must NOT be packed into asar (it's a real executable tree)
+# backend / chromium are extraResources (never in asar); no native Node modules exist
 asarUnpack: []
+# Called after the .app is staged. Handles ad-hoc signing of the Python backend
+# and Chromium binaries in Contents/Resources/ before sealing the outer bundle.
+# In Developer ID mode it just verifies — electron-builder already signed everything.
+afterSign: scripts/after-sign.cjs
 mac:
+  # arch is controlled by --arm64 / --x64 CLI flags passed by build.mjs;
+  # removing the hardcoded arch list here lets the CLI flag drive the build.
   target:
-    - target: dmg
-      arch: [arm64]
-    - target: zip
-      arch: [arm64]
+    - dmg
+    - zip
   category: public.app-category.developer-tools
-  # Signing/notarization are driven by env (CSC_LINK, APPLE_ID, …) via scripts/build.mjs:
-  # signed when those secrets are present, ad-hoc otherwise. Hardened runtime for notarization.
-  hardenedRuntime: true
+  # hardenedRuntime defaults OFF so ad-hoc builds work without the dyld
+  # team-ID mismatch. build.mjs flips it ON via --config.mac.hardenedRuntime=true
+  # when a Developer ID cert is detected (required for notarization).
+  hardenedRuntime: false
   gatekeeperAssess: false
+  notarize: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   artifactName: "${productName}-${version}-${arch}.${ext}"
