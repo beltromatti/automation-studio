@@ -29,6 +29,7 @@ export function RunRow({ run }: { run: Run }) {
           {run.id}
           {run.status === "scheduled" && run.startAt && ` · starts ${untilTime(run.startAt)}${run.everySeconds ? `, repeats every ${Math.round(run.everySeconds / 60)}m` : ""}`}
           {run.startedAt && ` · took ${duration(run.startedAt, run.finishedAt)}`}
+          {run.timeoutSec && ` · timeout ${Math.round(run.timeoutSec / 60)}m`}
           {run.rows != null && ` · ${run.rows} rows`}
           {waiting && ` · waiting for ${run.profileName}`}
         </div>

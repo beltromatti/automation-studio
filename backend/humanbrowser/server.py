@@ -41,7 +41,8 @@ class ControlServer:
     async def h_observe(self, request: web.Request) -> web.Response:
         fmt = request.query.get("format", "text")
         max_nodes = int(request.query.get("max_nodes", 1200))
-        ctx = await self.browser.observe(max_nodes=max_nodes)
+        async with self._lock:
+            ctx = await self.browser.observe(max_nodes=max_nodes)
         if fmt == "json":
             return web.json_response(ctx.to_dict())
         return web.json_response({"text": ctx.to_text()})
@@ -71,7 +72,8 @@ class ControlServer:
 
     async def h_screenshot(self, request: web.Request) -> web.Response:
         full = request.query.get("full", "0") in {"1", "true", "yes"}
-        path = await self.browser.screenshot(full_page=full)
+        async with self._lock:
+            path = await self.browser.screenshot(full_page=full)
         return web.json_response({"ok": True, "path": path})
 
     async def h_switch_mode(self, request: web.Request) -> web.Response:
@@ -82,11 +84,14 @@ class ControlServer:
 
     async def h_eval(self, request: web.Request) -> web.Response:
         data = await request.json()
-        result = await self.browser.eval_js(data["script"])
+        async with self._lock:
+            result = await self.browser.eval_js(data["script"])
         return web.json_response({"ok": True, "result": result})
 
     async def h_text(self, request: web.Request) -> web.Response:
-        return web.json_response({"text": await self.browser.get_text()})
+        async with self._lock:
+            text = await self.browser.get_text()
+        return web.json_response({"text": text})
 
     async def h_shutdown(self, request: web.Request) -> web.Response:
         async def _kill():

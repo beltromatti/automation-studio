@@ -25,6 +25,7 @@ import aiohttp
 import psutil
 
 from humanbrowser.config import data_dir
+from .registry import DEFAULT_WORKFLOW_TIMEOUT_SEC
 
 RS = "\x1e"
 PORT_BASE = 8810
@@ -123,6 +124,7 @@ class Run:
     attachPort: int | None = None  # if set, attach to an agent's existing control-server (shared browser)
     agentId: str | None = None     # the agent session that launched this run, if any
     inputDatasetId: str | None = None  # a dataset fed as the run's input list (list-consuming workflows)
+    timeoutSec: int = DEFAULT_WORKFLOW_TIMEOUT_SEC
     startAt: float | None = None   # when status == "scheduled": fire (→ queued) at this time
     everySeconds: float | None = None  # recurring: re-arm the next occurrence on fire
 
@@ -136,7 +138,7 @@ class RunManager:
         self.logs: dict[str, list[str]] = {}
         self.flags: dict[str, dict] = {}  # id -> {canceled, takingControl}
         self.sessions: dict[str, dict] = {}  # profileId -> {proc, port} (manual open sessions)
-        self.agent_browsers: dict[str, dict] = {}  # agent session id -> {proc, port, pid} (agent-owned)
+        self.agent_browsers: dict[str, dict] = {}  # agent session id -> {proc, port, pid, headed} (agent-owned)
         self._acquiring: set[str] = set()  # persistent profile ids being claimed right now (race guard)
         self.settings = {"maxConcurrency": 1}
         self._http: aiohttp.ClientSession | None = None
@@ -205,7 +207,7 @@ class RunManager:
                     self.create(run.workflowId, run.params, watch=run.watch, profile_id=run.profileId,
                                 dataset_id=run.datasetId, agent_id=run.agentId,
                                 input_dataset_id=run.inputDatasetId, start_at=nxt,
-                                every_seconds=run.everySeconds)
+                                every_seconds=run.everySeconds, timeout_sec=run.timeoutSec)
                 except Exception:
                     pass
                 run.everySeconds = None  # this occurrence is now a one-shot
@@ -267,13 +269,29 @@ class RunManager:
         if not headed:
             cmd.append("--headless")
         proc = await self._spawn(cmd)
-        self.agent_browsers[sid] = {"proc": proc, "port": port, "pid": pid}
+        self.agent_browsers[sid] = {"proc": proc, "port": port, "pid": pid, "headed": bool(headed)}
         if not await self._wait_ready(port, 25):
             kill_tree(proc.pid)
             self.agent_browsers.pop(sid, None)
             return {"ok": False, "error": "browser failed to start"}
         profiles.touch(pid)
         return {"ok": True, "port": port}
+
+    async def control_agent_browser(self, sid: str, action: str) -> dict:
+        """Show/hide an agent-owned browser without changing profile ownership."""
+        b = self.agent_browsers.get(sid)
+        if not b:
+            return {"ok": False, "error": "agent has no live browser"}
+        if action not in {"show", "hide"}:
+            return {"ok": False, "error": f"unknown action: {action}"}
+        headed = action == "show"
+        await self._server_post(b["port"], "/switch_mode", {"headless": not headed})
+        b["headed"] = headed
+        for r in self.runs.values():
+            if r.attachPort == b["port"] and r.status in ACTIVE:
+                r.watch = headed
+        self._save()
+        return {"ok": True, "headed": headed, "port": b["port"]}
 
     async def release_agent_browser(self, sid: str) -> None:
         """Close an agent-owned control-server gracefully (flush the profile DBs +
@@ -463,7 +481,7 @@ class RunManager:
 
     def set_settings(self, s: dict) -> dict:
         if isinstance(s.get("maxConcurrency"), (int, float)):
-            self.settings["maxConcurrency"] = max(1, min(MAX_CONCURRENCY, int(s["maxConcurrency"])))
+            self.settings["maxConcurrency"] = max(1, min(GLOBAL_SAFETY_CAP, int(s["maxConcurrency"])))
         self._save()
         self.schedule()
         return self.settings
@@ -472,7 +490,7 @@ class RunManager:
                profile_id: str = "ephemeral", dataset_id: str | None = None,
                attach_port: int | None = None, agent_id: str | None = None,
                input_dataset_id: str | None = None, start_at: float | None = None,
-               every_seconds: float | None = None) -> Run:
+               every_seconds: float | None = None, timeout_sec: int | float | None = None) -> Run:
         from .registry import get_workflow
         from . import profiles
         wf = get_workflow(workflow_id)
@@ -488,6 +506,18 @@ class RunManager:
             if not prof:
                 raise ValueError(f"unknown profile: {profile_id}")
             profile_name = prof["name"]
+        if attach_port:
+            b = self.agent_browsers.get(agent_id or "")
+            if not b or int(attach_port) != int(b.get("port") or 0):
+                raise ValueError("attached workflow must use the launching agent's browser")
+            if profile_id != b.get("pid"):
+                raise ValueError("attached workflow must use the agent's assigned profile")
+            watch = bool(b.get("headed"))
+        try:
+            resolved_timeout = int(float(timeout_sec)) if timeout_sec is not None else int(wf.timeout_sec)
+        except (TypeError, ValueError):
+            resolved_timeout = DEFAULT_WORKFLOW_TIMEOUT_SEC
+        resolved_timeout = max(30, min(24 * 3600, resolved_timeout))
         rid = uuid.uuid4().hex[:8]
         # A future start time parks the run as "scheduled" — the Timeline flips it to
         # "queued" when due, then the Studio Scheduler grants the profile lock as
@@ -497,7 +527,7 @@ class RunManager:
                   status="scheduled" if scheduled else "queued", watch=bool(watch), createdAt=time.time(),
                   profileKey=profile_id, profileId=profile_id, profileName=profile_name,
                   datasetId=dataset_id or None, attachPort=attach_port or None, agentId=agent_id or None,
-                  inputDatasetId=input_dataset_id or None,
+                  inputDatasetId=input_dataset_id or None, timeoutSec=resolved_timeout,
                   startAt=(start_at if scheduled else None), everySeconds=every_seconds or None)
         self.runs[rid] = run
         (RUNS_DIR / rid).mkdir(parents=True, exist_ok=True)
@@ -796,7 +826,18 @@ class RunManager:
         self._save()
 
     async def _await_workflow(self, run: Run, work) -> None:
-        code = await work.wait()
+        timeout = max(30, int(run.timeoutSec or DEFAULT_WORKFLOW_TIMEOUT_SEC))
+        try:
+            code = await asyncio.wait_for(work.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            self.flags.setdefault(run.id, {})["timedOut"] = True
+            run.error = f"workflow timed out after {timeout}s"
+            self._log(run.id, f"[backend] timeout after {timeout}s — canceling workflow")
+            kill_tree(work.pid)
+            try:
+                code = await asyncio.wait_for(work.wait(), timeout=10)
+            except Exception:
+                code = -9
         await self._on_workflow_close(run, code)
 
     async def _on_workflow_close(self, run: Run, code: int) -> None:
@@ -806,6 +847,11 @@ class RunManager:
         csv = RUNS_DIR / run.id / "output.csv"
         if flags.get("canceled"):
             run.status = "canceled"
+            await self.shutdown_server(run)
+        elif flags.get("timedOut"):
+            run.status = "failed"
+            run.error = run.error or f"workflow timed out after {run.timeoutSec}s"
+            self._log(run.id, f"[backend] failed: {run.error}")
             await self.shutdown_server(run)
         elif flags.get("takingControl"):
             run.status = "controlled"

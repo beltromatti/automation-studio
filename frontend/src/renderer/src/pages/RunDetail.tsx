@@ -92,6 +92,10 @@ export default function RunDetail() {
                 {(run.profileId === "ephemeral" || run.profileId === "temporary") && <span className="text-faint">· throwaway</span>}
               </span>
             )}
+            <span className="inline-flex items-center gap-1.5 text-[11.5px] px-2 py-0.5 rounded-md" style={{ background: "#161616", border: "1px solid var(--color-line)" }}>
+              <Icon name="clock" size={12} />
+              timeout {Math.round(run.timeoutSec / 60)}m
+            </span>
             <span className="text-[12px] text-faint mono ml-auto">
               {run.status === "scheduled"
                 ? `scheduled · starts ${untilTime(run.startAt)}${run.everySeconds ? ` · repeats every ${Math.round(run.everySeconds / 60)}m` : ""}`

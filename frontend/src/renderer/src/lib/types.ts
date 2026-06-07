@@ -63,6 +63,7 @@ export interface WorkflowDef {
   profile: "shared" | "ephemeral";
   profileName?: string; // for shared profiles (e.g. "default")
   needsAuth?: boolean;
+  timeoutSec?: number;
   params: WorkflowParam[];
   outputContract?: ContractColumn[]; // columns the result CSV carries
   inputContract?: ContractColumn[]; // when set, consumes a dataset of these columns as input
@@ -102,6 +103,7 @@ export interface Run {
   profileDir: string;
   browserOpen: boolean; // control server / window still alive
   agentId?: string; // the agent session that launched this run, if any
+  timeoutSec: number;
   startAt?: number; // when status === "scheduled": fire (epoch seconds)
   everySeconds?: number; // recurring: re-arm the next occurrence
 }

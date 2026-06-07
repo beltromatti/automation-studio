@@ -174,7 +174,7 @@ def t_dataset_project(a):
 def t_create_workflow(a):
     body = {k: a.get(k) for k in ("id", "name", "description", "code", "params",
                                   "outputContract", "inputContract", "profile", "profileName",
-                                  "needsAuth", "icon") if a.get(k) is not None}
+                                  "needsAuth", "icon", "timeoutSec") if a.get(k) is not None}
     body["createdBy"] = "agent"
     return _api("POST", "/api/workflows", body)
 
@@ -185,10 +185,12 @@ def t_workflow_source(a):
 
 def t_run_workflow(a):
     profile = a.get("profileId") or AGENT_PROFILE_ID
+    if CONTROL_PORT_INT and profile != AGENT_PROFILE_ID:
+        return {"error": "browser agents must run workflows on their assigned profile; omit profileId or use the assigned profile"}
     body = {"workflowId": a["workflowId"], "params": a.get("params", {}),
             "profileId": profile, "watch": a.get("watch", False),
             "datasetId": a.get("datasetId"), "inputDatasetId": a.get("inputDatasetId"),
-            "agentId": AGENT_SESSION_ID or None}
+            "agentId": AGENT_SESSION_ID or None, "timeoutSec": a.get("timeoutSec")}
     # When the agent owns a browser and runs on its own profile, the workflow
     # shares that browser (attach) instead of launching a second one.
     if CONTROL_PORT_INT and profile == AGENT_PROFILE_ID:
@@ -199,7 +201,7 @@ def t_run_workflow(a):
 
 
 def _run_brief(run: dict) -> dict:
-    return {k: run.get(k) for k in ("id", "status", "rows", "error", "csvPath", "datasetId")
+    return {k: run.get(k) for k in ("id", "status", "rows", "error", "csvPath", "datasetId", "timeoutSec")
             if run.get(k) is not None} | {"progress": run.get("progress")}
 
 
@@ -224,16 +226,20 @@ def t_list_runs(a):
     runs = _api("GET", "/api/runs").get("runs", [])
     runs = runs[: int(a.get("limit", 25))]
     return [{k: r.get(k) for k in ("id", "workflowId", "workflowName", "status", "rows",
-                                   "profileId", "error", "createdAt") if r.get(k) is not None}
+                                   "profileId", "error", "createdAt", "timeoutSec") if r.get(k) is not None}
             | {"progress": r.get("progress")} for r in runs]
 
 
 def t_schedule_workflow(a):
+    profile = a.get("profileId") or AGENT_PROFILE_ID
+    if CONTROL_PORT_INT and profile != AGENT_PROFILE_ID:
+        return {"error": "browser agents must schedule workflows on their assigned profile; omit profileId or use the assigned profile"}
     body = {"workflowId": a["workflowId"], "params": a.get("params", {}),
-            "profileId": a.get("profileId") or AGENT_PROFILE_ID,
+            "profileId": profile,
             "datasetId": a.get("datasetId"), "inputDatasetId": a.get("inputDatasetId"),
             "agentId": AGENT_SESSION_ID or None,
-            "inSeconds": a.get("inSeconds"), "at": a.get("at"), "everySeconds": a.get("everySeconds")}
+            "inSeconds": a.get("inSeconds"), "at": a.get("at"), "everySeconds": a.get("everySeconds"),
+            "timeoutSec": a.get("timeoutSec")}
     d = _api("POST", "/api/runs", body)
     run = d.get("run") or {}
     return {"runId": run.get("id"), "status": run.get("status"), "startAt": run.get("startAt"),
@@ -719,10 +725,24 @@ def t_browser_click(a):
     return _need_browser() or _ctrl("POST", "/act", {"action": "click", "index": int(a["index"])})
 
 
+def _type_timeout_sec(text: str, requested: float | None = None) -> float:
+    if requested is not None:
+        try:
+            return max(30.0, float(requested))
+        except (TypeError, ValueError):
+            pass
+    # Humanized typing is intentionally slow (roughly 8-12 chars/sec plus
+    # punctuation pauses). Give long posts enough time, with a finite upper bound.
+    chars = len(text or "")
+    lines = (text or "").count("\n")
+    return min(3600.0, max(120.0, 30.0 + chars * 0.28 + lines * 0.8))
+
+
 def t_browser_type(a):
+    timeout = _type_timeout_sec(str(a.get("text", "")), a.get("timeoutSec"))
     return _need_browser() or _ctrl("POST", "/act", {"action": "type", "index": int(a["index"]),
                                                      "text": a["text"], "clear": a.get("clear", False),
-                                                     "enter": a.get("enter", False)})
+                                                     "enter": a.get("enter", False)}, timeout=timeout)
 
 
 def t_browser_press(a):
@@ -1009,19 +1029,21 @@ STUDIO_TOOLS = [
     ("studio_dataset_project", "Create a new dataset from selected/renamed columns of another (prep a tidy input for the next workflow). columns: [{from,to}] or [name].",
      {"type": "object", "properties": {"srcId": {"type": "string"}, "columns": {"type": "array"},
                                        "name": {"type": "string"}, "dedupKeys": {"type": "array"}}, "required": ["srcId", "columns", "name"]}, t_dataset_project),
-    ("studio_create_workflow", "Create — or update an existing user/agent workflow (pass its id) — a reusable workflow from Python code. The code must define main(argv) and should use `from automations import userkit` (userkit.parse(argv) -> params,server,output; userkit.input_rows(argv) for list-consuming workflows; userkit.run_session(fn,params,server); userkit.write_csv(output,rows,columns); userkit.progress/log/error). params: [{name,label,type:string|number|boolean|select,default,help,options}]. outputContract/inputContract: [{name,type}] (set inputContract to make it list-consuming/chainable). profile: 'ephemeral'|'shared'. Built-ins are READ-ONLY: passing a built-in's id forks an editable copy instead of overwriting (the result carries a `warning` + `copiedFromBuiltin`), exactly like the human editor.",
+    ("studio_create_workflow", "Create — or update an existing user/agent workflow (pass its id) — a reusable workflow from Python code. The code must define main(argv) and should use `from automations import userkit` (userkit.parse(argv) -> params,server,output; userkit.input_rows(argv) for list-consuming workflows; userkit.run_session(fn,params,server); userkit.write_csv(output,rows,columns); userkit.progress/log/error). params: [{name,label,type:string|number|boolean|select,default,help,options}]. outputContract/inputContract: [{name,type}] (set inputContract to make it list-consuming/chainable). profile: 'ephemeral'|'shared'. timeoutSec sets the default run timeout. Built-ins are READ-ONLY: passing a built-in's id forks an editable copy instead of overwriting (the result carries a `warning` + `copiedFromBuiltin`), exactly like the human editor.",
      {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"},
                                        "description": {"type": "string"}, "code": {"type": "string"},
                                        "params": {"type": "array"}, "outputContract": {"type": "array"},
                                        "inputContract": {"type": "array"},
-                                       "profile": {"type": "string"}, "needsAuth": {"type": "boolean"},
-                                       "icon": {"type": "string"}}, "required": ["name", "code"]}, t_create_workflow),
+                                       "profile": {"type": "string"}, "profileName": {"type": "string"},
+                                       "needsAuth": {"type": "boolean"},
+                                       "icon": {"type": "string"}, "timeoutSec": {"type": "integer"}}, "required": ["name", "code"]}, t_create_workflow),
     ("studio_workflow_source", "Read a workflow's Python source — works for user/agent AND built-in workflows. Use studio_get_workflow for source + settings together.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}}, "required": ["workflowId"]}, t_workflow_source),
-    ("studio_run_workflow", "Start a workflow run. Defaults to this agent's own profile. Bind datasetId to auto-append the result on success. For list-consuming workflows (those with an input contract, e.g. url-titles), set inputDatasetId to feed a dataset of rows as input. Returns runId.",
+    ("studio_run_workflow", "Start a workflow run. Defaults to this agent's own profile. Browser agents must use their assigned profile and the run shares the agent's browser. Bind datasetId to auto-append the result on success. For list-consuming workflows (those with an input contract, e.g. url-titles), set inputDatasetId to feed a dataset of rows as input. timeoutSec overrides this run's timeout. Returns runId.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}, "params": {"type": "object"},
                                        "profileId": {"type": "string"}, "datasetId": {"type": "string"},
-                                       "inputDatasetId": {"type": "string"}, "watch": {"type": "boolean"}},
+                                       "inputDatasetId": {"type": "string"}, "watch": {"type": "boolean"},
+                                       "timeoutSec": {"type": "integer"}},
       "required": ["workflowId"]}, t_run_workflow),
     ("studio_run_status", "Get a run's current status, progress, row count and error.",
      {"type": "object", "properties": {"runId": {"type": "string"}}, "required": ["runId"]}, t_run_status),
@@ -1040,11 +1062,12 @@ STUDIO_TOOLS = [
     ("studio_run_to_dataset", "Append a finished run's result into a dataset (new if no datasetId, else existing). The canonical way to capture a run's output into the persistent data layer.",
      {"type": "object", "properties": {"runId": {"type": "string"}, "datasetId": {"type": "string"},
                                        "name": {"type": "string"}, "dedupKeys": {"type": "array"}}, "required": ["runId"]}, t_run_to_dataset),
-    ("studio_schedule_workflow", "Schedule a workflow to run later (not now): set `inSeconds` (relative) or `at` (unix epoch seconds), and optionally `everySeconds` to repeat. It appears as a `scheduled` run, fires into the queue when due, then takes the profile lock normally. Same params as studio_run_workflow (params/profileId/inputDatasetId/datasetId). You'll be notified when each occurrence finishes, like any run you launch.",
+    ("studio_schedule_workflow", "Schedule a workflow to run later (not now): set `inSeconds` (relative) or `at` (unix epoch seconds), and optionally `everySeconds` to repeat. It appears as a `scheduled` run, fires into the queue when due, then takes the profile lock normally. Same params as studio_run_workflow (params/profileId/inputDatasetId/datasetId/timeoutSec). Browser agents must use their assigned profile. You'll be notified when each occurrence finishes, like any run you launch.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}, "params": {"type": "object"},
                                        "profileId": {"type": "string"}, "inputDatasetId": {"type": "string"},
                                        "datasetId": {"type": "string"}, "inSeconds": {"type": "number"},
-                                       "at": {"type": "number"}, "everySeconds": {"type": "number"}}, "required": ["workflowId"]}, t_schedule_workflow),
+                                       "at": {"type": "number"}, "everySeconds": {"type": "number"},
+                                       "timeoutSec": {"type": "integer"}}, "required": ["workflowId"]}, t_schedule_workflow),
     ("studio_schedule_wake", "Schedule YOURSELF to be woken later with a prompt (set `inSeconds` or `at`). End your turn after calling this; you'll rest as `scheduled` (releasing the profile so others can use it) and be re-activated at that time with the prompt. Use this to wait on something external, pace work, or come back to a task later.",
      {"type": "object", "properties": {"inSeconds": {"type": "number"}, "at": {"type": "number"}, "prompt": {"type": "string"}}, "required": ["prompt"]}, t_schedule_wake),
     ("studio_cancel_schedule", "Cancel a scheduled item: pass `runId` to cancel a scheduled workflow run, or no args to cancel your own pending scheduled wake.",
@@ -1137,9 +1160,10 @@ BROWSER_TOOLS = [
                                        "maxNodes": {"type": "integer"}}}, t_browser_inspect),
     ("browser_click", "Click the element at the given [index] from the most recent browser_observe/browser_inspect/browser_wait.",
      {"type": "object", "properties": {"index": {"type": "integer"}}, "required": ["index"]}, t_browser_click),
-    ("browser_type", "Type into the element at [index]. Set enter=true to submit, clear=true to clear first.",
+    ("browser_type", "Type into the element at [index]. Set enter=true to submit, clear=true to clear first. The timeout is automatically scaled to the text length so long posts complete before the next browser action.",
      {"type": "object", "properties": {"index": {"type": "integer"}, "text": {"type": "string"},
-                                       "enter": {"type": "boolean"}, "clear": {"type": "boolean"}}, "required": ["index", "text"]}, t_browser_type),
+                                       "enter": {"type": "boolean"}, "clear": {"type": "boolean"},
+                                       "timeoutSec": {"type": "number"}}, "required": ["index", "text"]}, t_browser_type),
     ("browser_press", "Press a key (e.g. Enter, Escape, ArrowDown).",
      {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}, t_browser_press),
     ("browser_scroll", "Scroll the page. Either by dy pixels (default 600) or to='top'|'bottom'. Scrolling to top is useful to dissolve sticky headers before acting.",
@@ -1185,8 +1209,24 @@ def _tools() -> list:
     return tools
 
 
+def _strict_input_schema(schema: dict) -> dict:
+    """Close top-level tool arguments while leaving nested data objects flexible.
+
+    OpenAI/Anthropic MCP clients both use the input schema to shape generated
+    arguments. A closed top-level object prevents garbage extra argument names
+    from becoming part of the engine request. Nested row/params objects stay
+    open because they intentionally carry user/workflow-defined keys.
+    """
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return schema
+    out = dict(schema)
+    out.setdefault("properties", {})
+    out.setdefault("additionalProperties", False)
+    return out
+
+
 def _tool_defs() -> list[dict]:
-    return [{"name": n, "description": d, "inputSchema": s} for (n, d, s, _f) in _tools()]
+    return [{"name": n, "description": d, "inputSchema": _strict_input_schema(s)} for (n, d, s, _f) in _tools()]
 
 
 _HANDLERS = {n: f for (n, _d, _s, f) in (STUDIO_TOOLS + BROWSER_TOOLS)}
@@ -1200,8 +1240,14 @@ def _coerce_args(name: str, args: dict) -> dict:
     declares as array/object, parse a JSON-looking string into the real value —
     so a tool never receives a string where it expects a list (which silently
     corrupted datasets char-by-char before)."""
+    if not isinstance(args, dict):
+        return {}
     props = (_SCHEMAS.get(name) or {}).get("properties") or {}
-    for k, v in list(args.items()):
+    for k in list(args):
+        if not isinstance(k, str) or len(k) > 256 or (props and k not in props):
+            args.pop(k, None)
+            continue
+        v = args[k]
         if isinstance(v, str) and (props.get(k) or {}).get("type") in ("array", "object"):
             s = v.strip()
             if s[:1] in ("[", "{"):

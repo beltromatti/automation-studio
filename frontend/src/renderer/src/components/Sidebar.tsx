@@ -9,7 +9,7 @@ import iconUrl from "@/assets/icon.png";
 const NAV = [
   { href: "/agents", label: "Agents", icon: "sparkles" },
   { href: "/agents/sessions", label: "Sessions", icon: "bot" },
-  { href: "/", label: "Workflows", icon: "layers" },
+  { href: "/workflows", label: "Workflows", icon: "layers" },
   { href: "/runs", label: "Runs", icon: "terminal" },
   { href: "/data", label: "Data", icon: "database" },
   { href: "/files", label: "Files", icon: "image" },
@@ -17,7 +17,6 @@ const NAV = [
 ];
 
 function matchesNav(href: string, pathname: string): boolean {
-  if (href === "/") return pathname === "/" || pathname.startsWith("/workflows");
   return pathname === href || pathname.startsWith(href + "/");
 }
 

@@ -33,6 +33,7 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
   const [name, setName] = useState(w ? (w.builtin ? `${w.name} (copy)` : w.name) : "");
   const [description, setDescription] = useState(w?.description ?? "");
   const [profile, setProfile] = useState<"ephemeral" | "shared">((w?.profile as "ephemeral" | "shared") ?? "ephemeral");
+  const [timeoutMin, setTimeoutMin] = useState(Math.max(1, Math.round((w?.timeoutSec ?? 3600) / 60)));
   const [needsAuth, setNeedsAuth] = useState(!!w?.needsAuth);
   const [params, setParams] = useState<PEdit[]>(
     (w?.params ?? []).map((p) => ({ name: p.name, label: p.label, type: p.type, default: p.default, help: p.help })));
@@ -59,6 +60,7 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
     try {
       const body: Record<string, unknown> = {
         name, description, profile, needsAuth, code, createdBy: "user", icon: w?.icon ?? "wand",
+        timeoutSec: Math.max(30, Math.round(timeoutMin * 60)),
         params: params.filter((p) => p.name.trim()).map((p) => ({ ...p, label: p.label || p.name })),
         outputContract: contract.filter((c) => c.name.trim()),
         inputContract: inputC.filter((c) => c.name.trim()),
@@ -92,6 +94,14 @@ export function WorkflowEditor({ workflow, onClose, onSaved }: {
             </select>
           </div>
         </div>
+        <label className="flex items-center gap-2 text-[13px] text-muted mb-3">
+          <Icon name="clock" size={14} />
+          <span>Default timeout:</span>
+          <input type="number" min={1} step={1} value={timeoutMin}
+                 onChange={(e) => setTimeoutMin(Math.max(1, Number(e.target.value) || 1))}
+                 className="input" style={{ width: 86, height: 30 }} />
+          <span className="text-faint">minutes</span>
+        </label>
         <label className="label">Description</label>
         <input className="input mt-1 mb-3" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What does it do?" />
 

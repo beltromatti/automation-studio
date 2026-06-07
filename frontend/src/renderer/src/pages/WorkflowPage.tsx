@@ -40,7 +40,7 @@ export default function WorkflowPage() {
       <Header
         title={
           <span className="flex items-center gap-2">
-            <Link to="/" className="text-muted hover:text-fg">Workflows</Link>
+            <Link to="/workflows" className="text-muted hover:text-fg">Workflows</Link>
             <Icon name="chevronRight" size={14} />
             {workflow.name}
             {!workflow.builtin && <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#0072f518", color: "#3b9eff" }}>{workflow.createdBy === "agent" ? "agent-made" : "custom"}</span>}

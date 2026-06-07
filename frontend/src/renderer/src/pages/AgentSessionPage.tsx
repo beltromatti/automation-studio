@@ -200,6 +200,13 @@ export default function AgentSessionPage() {
     try { await jpost(`/api/agents/sessions/${id}/stop`); await refreshMeta(); }
     finally { setBusy(false); }
   };
+  const controlBrowser = async (action: "show" | "hide") => {
+    setBusy(true);
+    try {
+      await jpost(`/api/agents/sessions/${id}/browser`, { action });
+      await refreshMeta();
+    } finally { setBusy(false); }
+  };
 
   if (!s) return (<><Header title="…" /><div className="px-7 py-6 text-faint text-[13px]">Loading agent session…</div></>);
 
@@ -216,7 +223,16 @@ export default function AgentSessionPage() {
         title={<span className="flex items-center gap-2"><Link to="/agents" className="text-muted hover:text-fg">Agents</Link><Icon name="chevronRight" size={14} /><span className="font-semibold">{s.agentName}</span></span>}
         actions={
           <>
-            {s.controlPort && <span className="text-[11px] px-2 py-1 rounded-md" style={{ background: "#f5a62312", color: "#f5a623" }}><Icon name="globe" size={12} /> browser :{s.controlPort}</span>}
+            {s.controlPort && (
+              <>
+                <span className="text-[11px] px-2 py-1 rounded-md" style={{ background: "#f5a62312", color: "#f5a623" }}>
+                  <Icon name={s.watch ? "eye" : "eyeOff"} size={12} /> browser :{s.controlPort}
+                </span>
+                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => controlBrowser(s.watch ? "hide" : "show")}>
+                  <Icon name={s.watch ? "eyeOff" : "eye"} size={13} /> {s.watch ? "Hide browser" : "Show browser"}
+                </button>
+              </>
+            )}
             {inFlight && <button className="btn btn-danger btn-sm" disabled={busy} onClick={stop}><Icon name="square" size={13} /> Stop</button>}
           </>
         }
@@ -230,6 +246,11 @@ export default function AgentSessionPage() {
           </span>
           <span className="text-[11.5px] text-faint">{s.engine}</span>
           <span className="inline-flex items-center gap-1 text-[11.5px] px-2 py-0.5 rounded-md" style={{ background: "#161616" }}><Icon name="user" size={12} /> {s.profileName}</span>
+          {s.controlPort && (
+            <span className="inline-flex items-center gap-1 text-[11.5px] px-2 py-0.5 rounded-md" style={{ background: "#161616" }}>
+              <Icon name={s.watch ? "eye" : "eyeOff"} size={12} /> {s.watch ? "visible" : "headless"}
+            </span>
+          )}
           {s.scopes.map((sc) => <span key={sc} className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#0072f518", color: "#3b9eff" }}>{sc}</span>)}
           {s.runIds.length > 0 && (
             <span className="text-[11px] text-faint flex items-center gap-1">

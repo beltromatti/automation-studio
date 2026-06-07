@@ -154,7 +154,8 @@ def create_app() -> FastAPI:
             run = mgr.create(body["workflowId"], body.get("params") or {}, bool(body.get("watch")),
                              body.get("profileId") or "ephemeral", body.get("datasetId"),
                              body.get("attachPort"), body.get("agentId"), body.get("inputDatasetId"),
-                             start_at=_resolve_at(body), every_seconds=body.get("everySeconds"))
+                             start_at=_resolve_at(body), every_seconds=body.get("everySeconds"),
+                             timeout_sec=body.get("timeoutSec"))
             return {"run": mgr.get(run.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
@@ -587,6 +588,12 @@ def create_app() -> FastAPI:
     async def agent_stop(sid: str):
         from .agents import get_agents
         return await get_agents().stop(sid)
+
+    @app.post("/api/agents/sessions/{sid}/browser")
+    async def agent_browser(sid: str, body: dict = Body(...)):
+        from .agents import get_agents
+        res = await get_agents().control_browser(sid, body.get("action", ""))
+        return JSONResponse(res, status_code=200 if res.get("ok") else 400)
 
     @app.post("/api/agents/sessions/{sid}/cancel-steer")
     async def agent_cancel_steer(sid: str, body: dict = Body(...)):

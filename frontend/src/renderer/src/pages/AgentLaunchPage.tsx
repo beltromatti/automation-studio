@@ -123,7 +123,7 @@ export default function AgentLaunchPage() {
               </div>
               <span className="text-[11px] text-faint">
                 {wantsBrowser
-                  ? "This agent drives a real browser on the chosen profile and can run workflows on that same session."
+                  ? "This agent owns the chosen profile. Workflows it runs use the same browser session; you can show or hide it later."
                   : "Studio-only agent: it orchestrates workflows & data. Workflows it launches pick their own profile."}
               </span>
             </div>

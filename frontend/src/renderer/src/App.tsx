@@ -1,4 +1,4 @@
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, Navigate } from "react-router-dom";
 import { RunsProvider } from "@/components/RunsProvider";
 import { Sidebar } from "@/components/Sidebar";
 import Overview from "@/pages/Overview";
@@ -26,7 +26,8 @@ export default function App() {
         <div className="flex-1 min-w-0 p-2 pt-[48px]">
           <main className="app-panel h-full overflow-y-auto">
           <Routes>
-            <Route path="/" element={<Overview />} />
+            <Route path="/" element={<Navigate to="/agents" replace />} />
+            <Route path="/workflows" element={<Overview />} />
             <Route path="/workflows/:id" element={<WorkflowPage />} />
             <Route path="/runs" element={<RunsPage />} />
             <Route path="/runs/:id" element={<RunDetail />} />

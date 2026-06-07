@@ -18,6 +18,7 @@ from humanbrowser.config import data_dir
 # read-only app bundle — so they work identically in dev and packaged builds.
 USER_DIR = data_dir() / "workflows"
 USER_INDEX = USER_DIR / "workflows.json"
+DEFAULT_WORKFLOW_TIMEOUT_SEC = 3600
 
 
 @dataclass
@@ -43,6 +44,7 @@ class WorkflowDef:
     build_argv: Callable[[dict], list[str]]
     profile_name: str | None = None
     needs_auth: bool = False
+    timeout_sec: int = DEFAULT_WORKFLOW_TIMEOUT_SEC
     params: list[WorkflowParam] = field(default_factory=list)
     # The columns this workflow's CSV result carries (name + logical type:
     # text|number|boolean). Lets a Dataset adopt/validate the shape when a run is
@@ -101,6 +103,7 @@ WORKFLOWS: list[WorkflowDef] = [
         module="automations.google_search",
         profile="ephemeral",
         needs_auth=False,
+        timeout_sec=900,
         params=[
             WorkflowParam("query", "Search query", "string", required=True,
                           placeholder="best espresso machine under 500"),
@@ -126,6 +129,7 @@ WORKFLOWS: list[WorkflowDef] = [
         profile="shared",
         profile_name="default",
         needs_auth=True,
+        timeout_sec=7200,
         params=[
             WorkflowParam("mode", "Mode", "select", default="full",
                           options=[{"value": "full", "label": "Full — open each profile & enrich"},
@@ -178,6 +182,7 @@ WORKFLOWS: list[WorkflowDef] = [
         icon="globe",
         module="automations.url_titles",
         profile="ephemeral",
+        timeout_sec=1200,
         needs_auth=False,
         params=[],
         build_argv=lambda p: ["--params-json", json.dumps(p)],
@@ -201,6 +206,7 @@ WORKFLOWS: list[WorkflowDef] = [
         profile="shared",
         profile_name="default",
         needs_auth=True,
+        timeout_sec=7200,
         params=[
             WorkflowParam("maxInvites", "Max invites this run", "number", default=0,
                           help="Safety cap on how many requests to actually send (0 = no cap). "
@@ -229,6 +235,7 @@ WORKFLOWS: list[WorkflowDef] = [
         icon="image",
         module="automations.media_meta",
         profile="ephemeral",
+        timeout_sec=900,
         needs_auth=False,
         params=[],
         build_argv=lambda p: ["--params-json", json.dumps(p)],
@@ -256,6 +263,7 @@ WORKFLOWS: list[WorkflowDef] = [
         profile="shared",
         profile_name="c9c42d740f",
         needs_auth=True,
+        timeout_sec=7200,
         params=[
             WorkflowParam("messages", "Message", "string",
                           placeholder="Ciao! Sono uno studente del Politecnico di Milano…",
@@ -300,6 +308,7 @@ WORKFLOWS: list[WorkflowDef] = [
         profile="shared",
         profile_name="default",
         needs_auth=True,
+        timeout_sec=7200,
         params=[
             WorkflowParam("messages", "Message", "string",
                           placeholder="Ciao! Volevo mettermi in contatto…",
@@ -342,6 +351,7 @@ def _def_from_meta(m: dict) -> WorkflowDef:
         id=m["id"], name=m.get("name", m["id"]), description=m.get("description", ""),
         icon=m.get("icon", "wand"), module=m.get("id"), profile=m.get("profile", "ephemeral"),
         profile_name=m.get("profileName"), needs_auth=bool(m.get("needsAuth")),
+        timeout_sec=_normalize_timeout(m.get("timeoutSec")),
         params=[WorkflowParam(**{k: pp.get(k) for k in WorkflowParam.__dataclass_fields__ if k in pp})
                 for pp in m.get("params", [])],
         output_contract=m.get("outputContract", []), build_argv=_user_argv,
@@ -400,6 +410,14 @@ def _normalize_params(params: Any) -> list[dict]:
     return out
 
 
+def _normalize_timeout(v: Any, default: int = DEFAULT_WORKFLOW_TIMEOUT_SEC) -> int:
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        n = default
+    return max(30, min(24 * 3600, n))
+
+
 def save_user_workflow(body: dict) -> dict:
     """Create or update a user/agent workflow: validate the code compiles and has
     main(), write the .py + index entry. Returns the public workflow."""
@@ -428,6 +446,7 @@ def save_user_workflow(body: dict) -> dict:
         "id": wid, "name": body.get("name", wid), "description": body.get("description", ""),
         "icon": body.get("icon", "wand"), "profile": body.get("profile", "ephemeral"),
         "profileName": body.get("profileName"), "needsAuth": bool(body.get("needsAuth")),
+        "timeoutSec": _normalize_timeout(body.get("timeoutSec")),
         "params": _normalize_params(body.get("params", [])), "outputContract": body.get("outputContract", []),
         "inputContract": body.get("inputContract", []),
         "file": file, "createdBy": body.get("createdBy", "user"),
@@ -514,7 +533,7 @@ def public_workflow(w: WorkflowDef) -> dict:
     return {
         "id": w.id, "name": w.name, "description": w.description, "icon": w.icon,
         "module": w.module, "profile": w.profile, "profileName": w.profile_name,
-        "needsAuth": w.needs_auth,
+        "needsAuth": w.needs_auth, "timeoutSec": w.timeout_sec,
         "params": [vars(p) for p in w.params],
         "outputContract": w.output_contract,
         "inputContract": w.input_contract,

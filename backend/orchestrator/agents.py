@@ -37,6 +37,8 @@ SESSIONS_DIR = DATA / "agent_runs"
 BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
 MAX_EVENTS = 4000
 TERMINAL = {"done", "failed", "stopped"}  # "canceled" is the legacy name (loaded → "stopped")
+MAX_NATIVE_THREAD_TURNS = 24
+MAX_NATIVE_THREAD_INPUT_TOKENS = 10_000_000
 
 ENGINES = {"codex", "claude"}
 
@@ -87,6 +89,7 @@ class AgentSession:
     error: str | None = None
     controlPort: int | None = None    # owned browser control-server (browser scope)
     threadId: str | None = None       # codex thread / claude session id (for steering)
+    threadStartedTurn: int = 0        # local turn index when the native thread was created
     usage: dict | None = None
     turns: int = 0
     runIds: list[str] = field(default_factory=list)
@@ -371,9 +374,10 @@ GENERAL_AGENT_PROMPT = (
     "context - it sends the session cookies, so it can pull session-locked assets (image inside a logged-in "
     "profile, authenticated API endpoint, ...) - use studio_files_fetch_url for plain public URLs without "
     "cookies. All four save into the file store and return the new file record.\n\n"
-    "PROFILES: a workflow that needs auth runs on a logged-in persistent profile (studio_list_profiles shows "
-    "the profiles and whether a login window is open); use an ephemeral profile for logged-out or throwaway "
-    "work. A persistent profile serves one run at a time, so others queue behind it.\n\n"
+    "PROFILES: your session has one assigned profile. If you own a browser, all browser work and every workflow "
+    "you launch must stay on that same profile and will share your browser session. Do not try to use another "
+    "profile. A studio-only agent may choose profiles for workflows. A persistent profile serves one owner at a "
+    "time, so others queue behind it.\n\n"
     "SCHEDULING & CONCURRENCY: a workflow you launch is detached - end your turn and you'll be woken when it "
     "finishes (never busy-loop or sleep). studio_schedule_workflow runs a workflow later or on a repeat; "
     "studio_schedule_wake pauses you and resumes you later with a prompt. If your profile is busy with a "
@@ -685,6 +689,33 @@ def _short(v: Any, n: int = 1200) -> str:
     return s if len(s) <= n else s[:n] + f"… (+{len(s) - n} chars)"
 
 
+def _resume_recoverable_failure(flags: dict) -> bool:
+    """Whether a failed native resume should be retried in a fresh thread.
+
+    Codex and Claude keep their own remote/native conversation state. Very long
+    sessions can occasionally become un-resumable even though Automation Studio's
+    local transcript is intact. In that case, the robust recovery is to drop the
+    native thread id and replay a compact handoff from our transcript.
+    """
+    if flags.get("resume_failed"):
+        return True
+    text = "\n".join([
+        str(flags.get("turn_error_msg") or ""),
+        *[str(x) for x in (flags.get("stderr_tail") or [])],
+    ]).lower()
+    markers = (
+        "no rollout",
+        "resume failed",
+        "resume not found",
+        "session not found",
+        "invalid_request_error",
+        "property_name_above_max_length",
+        "invalid property name",
+        "orphan function call output",
+    )
+    return any(m in text for m in markers)
+
+
 class AgentManager:
     def __init__(self):
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -826,6 +857,7 @@ class AgentManager:
                 s = self.sessions.get(sid)
                 if s and not s.threadId:
                     s.threadId = ev["threadId"]
+                    s.threadStartedTurn = s.turns
             if ev.get("kind") == "usage":
                 s = self.sessions.get(sid)
                 if s:
@@ -1014,6 +1046,30 @@ class AgentManager:
         self._maybe_deliver(s)
         return {"ok": True}
 
+    async def control_browser(self, sid: str, action: str) -> dict:
+        """Show/hide the browser for a live browser-scope agent session.
+
+        The session's `watch` flag is the user's preference for this session. If
+        the browser is currently open, flip the live control-server too; otherwise
+        store the preference for the next turn that acquires the profile.
+        """
+        s = self.sessions.get(sid)
+        if not s:
+            return {"ok": False, "error": "no such session"}
+        if action not in {"show", "hide"}:
+            return {"ok": False, "error": f"unknown action: {action}"}
+        s.watch = action == "show"
+        if not s.controlPort:
+            self._save_sessions()
+            return {"ok": True, "headed": s.watch, "note": "preference saved for next browser turn"}
+        res = await get_manager().control_agent_browser(sid, action)
+        if res.get("ok"):
+            s.watch = bool(res.get("headed"))
+            self._emit(sid, {"kind": "system",
+                             "text": f"browser is now {'visible' if s.watch else 'headless'}"})
+            self._save_sessions()
+        return res
+
     async def shutdown(self) -> None:
         for sid, proc in list(self.procs.items()):
             if proc and proc.pid:
@@ -1031,6 +1087,23 @@ class AgentManager:
         role = (d.systemPrompt if d else "") or ""
         parts = [head] + ([role] if role else []) + ([note] if note else [])
         return "\n\n".join(parts)
+
+    def _should_rollover_thread(self, s: AgentSession) -> bool:
+        """Proactively rotate long native engine threads.
+
+        The durable source of truth is Automation Studio's local transcript and
+        data layer, not the engine's private resume state. Rotating before a very
+        long native thread becomes brittle keeps Codex and Claude behavior
+        symmetric and prevents unbounded resume context growth.
+        """
+        native_turns = max(0, int(s.turns or 0) - int(s.threadStartedTurn or 0))
+        if native_turns >= MAX_NATIVE_THREAD_TURNS:
+            return True
+        usage = s.usage or {}
+        try:
+            return int(usage.get("input_tokens") or 0) >= MAX_NATIVE_THREAD_INPUT_TOKENS
+        except Exception:
+            return False
 
     def _run_active(self, rid: str) -> bool:
         try:
@@ -1434,6 +1507,14 @@ class AgentManager:
 
         ws = SESSIONS_DIR / s.id / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
+        if resume and s.threadId and self._should_rollover_thread(s):
+            self._emit(s.id, {"kind": "system",
+                              "text": "↻ native engine thread is large; continuing in a fresh thread with a compact Studio handoff"})
+            prompt = self._reconstruct_fresh_prompt(s, s.prompt or "", prompt)
+            s.threadId = None
+            s.threadStartedTurn = s.turns
+            resume = False
+            self._save_sessions()
         resume_attempted = resume and bool(s.threadId)  # did we use the engine's resume path?
         try:
             if s.engine == "codex":
@@ -1563,14 +1644,17 @@ class AgentManager:
                 full = self._reconstruct_fresh_prompt(s, s.prompt or prompt, wake)
                 await self._run_turn(s, full, resume=False)
             return
-        # Resume failed (e.g. the prior turn was interrupted before the engine
-        # saved its rollout) → fall back to a fresh turn so the message still runs.
-        # CRITICAL: preserve the killed turn's I/O via reconstruction, so a fresh
+        # Resume failed or the native engine thread is internally inconsistent
+        # (e.g. Codex "orphan function call output" followed by an API schema
+        # rejection) → fall back to a fresh native thread so the user message
+        # still runs. CRITICAL: preserve prior I/O via reconstruction, so a
         # restart doesn't lose what the agent already did.
-        if code != 0 and resume_attempted and turn_flags.get("resume_failed") and not _retry and s.status != "stopped":
+        if (code != 0 and resume_attempted and _resume_recoverable_failure(turn_flags)
+                and not _retry and s.status != "stopped"):
             self._emit(s.id, {"kind": "system",
-                              "text": "↻ couldn't resume the previous thread — starting a fresh session WITH the prior context preserved"})
+                              "text": "↻ native engine resume failed — starting a fresh thread with the prior context preserved"})
             s.threadId = None
+            s.threadStartedTurn = s.turns
             full = self._reconstruct_fresh_prompt(s, s.prompt or "", prompt)
             await self._run_turn(s, full, resume=False, _retry=True)
             return
@@ -1653,6 +1737,8 @@ class AgentManager:
                     del tail[0]
                 # detect a failed resume so the caller can retry the message fresh
                 if "no rollout" in low or ("resume" in low and ("fail" in low or "not found" in low)):
+                    flags["resume_failed"] = True
+                if "orphan function call output" in low:
                     flags["resume_failed"] = True
             # engine stderr is mostly progress noise; surface only error-ish lines
             if any(w in low for w in ("error", "failed", "exception", "denied", "traceback", "panic")):
