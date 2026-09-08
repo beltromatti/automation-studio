@@ -940,6 +940,20 @@ def t_browser_expect_download(a):
         return {"error": f"download captured but registration failed: {e}", "path": path}
 
 
+def t_browser_resolve_url(a):
+    """Follow a redirect chain by headers alone and report where it lands."""
+    err = _need_browser()
+    if err:
+        return err
+    r = _ctrl("POST", "/act", {"action": "resolve_url", "url": a["url"],
+                               "max_hops": int(a.get("maxHops", 5)),
+                               "timeout_ms": int(a.get("timeoutSec", 15) * 1000)},
+              timeout=float(a.get("timeoutSec", 15)) + 10)
+    if isinstance(r, dict) and r.get("error"):
+        return r
+    return (r or {}).get("result") or {}
+
+
 def t_browser_fetch(a):
     """HTTP GET via the browser's request context — sends the session cookies
     (the right tool for session-locked downloads, e.g. an image inside a
@@ -1193,6 +1207,10 @@ BROWSER_TOOLS = [
      {"type": "object", "properties": {"url": {"type": "string"}, "name": {"type": "string"},
                                        "headers": {"type": "object"}, "timeoutSec": {"type": "number"}},
       "required": ["url"]}, t_browser_fetch),
+    ("browser_resolve_url", "Follow a redirect chain and return the final URL, reading only headers (no page is downloaded). The tool for tracking/redirect links that hide the real destination — search engines now wrap every result in one, so the href you scrape off the page is a one-shot token rather than the page itself. Sends the session cookies, so redirects behind a login resolve too.",
+     {"type": "object", "properties": {"url": {"type": "string"}, "maxHops": {"type": "integer"},
+                                       "timeoutSec": {"type": "number"}},
+      "required": ["url"]}, t_browser_resolve_url),
     ("browser_file_chooser", "For sites where the upload UI is a custom button that opens the OS file picker and no `<input type=file>` is reachable directly: clicks the button at [index] WHILE expecting a file-chooser, then provides the file(s) to it. Most uploaders have a hidden `<input>` and browser_upload is enough — try that first; use this when it doesn't.",
      {"type": "object", "properties": {"index": {"type": "integer"},
                                        "fileId": {"type": "string"}, "path": {"type": "string"},

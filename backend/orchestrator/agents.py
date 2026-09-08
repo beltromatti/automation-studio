@@ -498,7 +498,10 @@ GENERAL_AGENT_PROMPT = (
     "waits for the next page-triggered download. browser_fetch(url) does an HTTP GET via the page's request "
     "context - it sends the session cookies, so it can pull session-locked assets (image inside a logged-in "
     "profile, authenticated API endpoint, ...) - use studio_files_fetch_url for plain public URLs without "
-    "cookies. All four save into the file store and return the new file record.\n\n"
+    "cookies. All four save into the file store and return the new file record. browser_resolve_url(url) "
+    "follows a redirect chain by headers alone and returns where it lands - reach for it whenever a link you "
+    "scraped is a tracking/redirect wrapper rather than the real page (search engines wrap every result in "
+    "one), so the URLs you store are the actual destinations.\n\n"
     "PROFILES: your session has one assigned profile. If you own a browser, all browser work and every workflow "
     "you launch must stay on that same profile and will share your browser session. Do not try to use another "
     "profile. A studio-only agent may choose profiles for workflows. A persistent profile serves one owner at a "
@@ -1882,6 +1885,11 @@ class AgentManager:
                     self._emit(s.id, {"kind": out_kind, "id": eid, "text": acc[eid],
                                       "partial": True})
                     continue
+                # Codex re-emits its whole plan on every update under a stable item
+                # id; scope that id to this turn so a later turn's plan replaces
+                # its own earlier revisions and not the previous turn's record.
+                if ev.get("id") and kind == "status":
+                    ev["id"] = f"{turn_id}-{ev['id']}"
                 # The canonical (full) block reclaims the id its partials streamed
                 # under, so the UI swaps the streaming text for the final, persisted
                 # one instead of showing it twice.

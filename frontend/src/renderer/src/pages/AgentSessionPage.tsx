@@ -487,6 +487,25 @@ function EventRow({ e, turnInfo }: { e: AgentEvent; turnInfo?: TurnInfo }) {
       {(e as any).partial === true && <span className="not-italic"> …</span>}
     </div>
   );
+  // -- the agent's own plan (Codex re-emits the whole to-do list as it works):
+  // render the steps, ticked ones struck through, instead of one long line
+  if (e.kind === "status" && (e as any).status === "plan") {
+    const steps = ((e as any).text || "").split(" · ").filter(Boolean);
+    return (
+      <div className="rounded-lg px-3 py-2 text-[12px] flex flex-col gap-1"
+           style={{ background: "#0072f50e", border: "1px solid #0072f530" }}>
+        <span className="text-[10.5px] text-faint uppercase tracking-wider flex items-center gap-1.5">
+          <Icon name="layers" size={11} /> plan
+        </span>
+        {steps.map((st: string, i: number) => {
+          const done = st.startsWith("✓");
+          return (
+            <span key={i} className={done ? "text-faint line-through" : "text-muted"}>{st}</span>
+          );
+        })}
+      </div>
+    );
+  }
   if (e.kind === "status") return <div className="text-[11px] text-faint flex items-center gap-1.5"><Icon name="clock" size={11} /> {(e as any).status}{(e as any).text ? ` — ${(e as any).text}` : ""}</div>;
   if (e.kind === "usage") return null;
   if (e.kind === "error") return <div className="text-[12.5px] rounded-lg px-3 py-2" style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>{(e as any).text}</div>;
