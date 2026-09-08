@@ -40,7 +40,9 @@ SESSIONS_DIR = DATA / "agent_runs"
 BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
 MAX_EVENTS = 4000
 TERMINAL = {"done", "failed", "stopped"}  # "canceled" is the legacy name (loaded → "stopped")
-MAX_NATIVE_THREAD_TURNS = 24
+# Last-resort ceiling on how big a native engine thread may get before we hand it
+# off to a fresh one. Deliberately far above where either CLI starts compacting on
+# its own — see _should_rollover_thread.
 MAX_NATIVE_THREAD_INPUT_TOKENS = 10_000_000
 
 ENGINES = {"codex", "claude"}
@@ -1288,20 +1290,25 @@ class AgentManager:
         return "\n\n".join(parts)
 
     def _should_rollover_thread(self, s: AgentSession) -> bool:
-        """Proactively rotate long native engine threads.
+        """Whether to abandon the native engine thread for a fresh one.
 
-        The durable source of truth is Automation Studio's local transcript and
-        data layer, not the engine's private resume state. Rotating before a very
-        long native thread becomes brittle keeps Codex and Claude behavior
-        symmetric and prevents unbounded resume context growth.
+        Almost never. Both CLIs manage their own context — Codex has
+        auto_compact_token_limit, Claude Code emits a compact_boundary and keeps
+        going — and their compacted thread is a far better memory of a long
+        conversation than any handoff we could rebuild from our transcript. An
+        earlier version rotated every 24 native turns, which threw that away
+        wholesale several times over the course of a long session.
+
+        So the durable recovery path is reactive, not preventive: when a resume
+        genuinely fails (_resume_recoverable_failure) we rebuild from our own
+        transcript, which stays the authoritative record either way. This ceiling
+        is only a backstop for a thread that somehow grows past anything the
+        engine's own compaction would allow.
         """
-        native_turns = max(0, int(s.turns or 0) - int(s.threadStartedTurn or 0))
-        if native_turns >= MAX_NATIVE_THREAD_TURNS:
-            return True
         usage = s.usage or {}
         try:
             return int(usage.get("input_tokens") or 0) >= MAX_NATIVE_THREAD_INPUT_TOKENS
-        except Exception:
+        except (TypeError, ValueError):
             return False
 
     def _run_active(self, rid: str) -> bool:
