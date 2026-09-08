@@ -1,6 +1,6 @@
 [project]
 name = "automation-backend"
-version = "1.5.2"
+version = "1.5.3"
 description = "Local backend for Automation Studio: humanbrowser engine + automations + orchestrator API"
 requires-python = ">=3.11"
 dependencies = [

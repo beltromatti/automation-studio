@@ -156,7 +156,15 @@ def create_app() -> FastAPI:
                              body.get("attachPort"), body.get("agentId"), body.get("inputDatasetId"),
                              start_at=_resolve_at(body), every_seconds=body.get("everySeconds"),
                              timeout_sec=body.get("timeoutSec"))
-            return {"run": mgr.get(run.id)}
+            out = {"run": mgr.get(run.id)}
+            # Surface deprecation AT THE MOMENT OF USE, not only in the listing: a
+            # caller (agent or UI) may be acting on a workflow list it fetched turns
+            # ago, and this is the last point where we can say "this one is unverified".
+            wf = get_workflow(run.workflowId)
+            if wf is not None and wf.deprecated:
+                out["warning"] = (f"'{wf.name}' is deprecated: {wf.deprecation_reason} "
+                                  f"Check the result before relying on it.")
+            return out
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)
 

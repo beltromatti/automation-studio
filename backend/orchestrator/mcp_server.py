@@ -84,14 +84,43 @@ def _need_browser() -> dict | None:
     return None if CONTROL else {"error": "no browser: this agent has no owned browser session"}
 
 
+# What an agent should DO about a deprecated workflow. Carried on every view of one
+# — a bare `deprecated: true` invites the model to note it and run the thing anyway.
+DEPRECATION_ADVICE = (
+    "DO NOT make this workflow your plan. It drives a third-party site and has not "
+    "been revalidated against that site's current markup; its usual failure is a "
+    "SILENT one — the run finishes green and the result is empty, partial, or applied "
+    "to the wrong element — so a green run proves nothing here.\n"
+    "WHAT TO DO INSTEAD (this is the recommendation, not a fallback): perform the task "
+    "yourself, live in the browser (browser_goto / browser_observe / browser_click / "
+    "browser_type), verifying each step by observing the page. It is slower, but you "
+    "can see what is actually happening and you will not silently do nothing. First "
+    "read the workflow's code with studio_get_workflow — its URL construction, "
+    "accessible-name matching, pacing and interstitial handling are still the best "
+    "reference for driving that site, and its safety caps are still the right limits "
+    "to respect by hand.\n"
+    "If you have no browser of your own, say so plainly and propose the workflow only "
+    "as an explicitly-unverified option, or suggest a browser-capable agent instead — "
+    "do not quietly fall back to running it.\n"
+    "Only run it if the user asks for it after you have told them it is deprecated and "
+    "unverified; then cap it to the smallest batch possible and read the output row by "
+    "row before going any further. Flagging it to the user is required either way."
+)
+
+
 def _workflow_view(w: dict) -> dict:
-    return {"id": w["id"], "name": w["name"], "description": w["description"],
-            "builtin": w.get("builtin"), "createdBy": w.get("createdBy"),
-            "profile": w.get("profile"), "needsAuth": w.get("needsAuth"),
-            "params": [{"name": p["name"], "label": p.get("label"), "type": p["type"],
-                        "required": p.get("required", False), "default": p.get("default"),
-                        "help": p.get("help", ""), "options": p.get("options")} for p in w.get("params", [])],
-            "inputContract": w.get("inputContract", []), "outputContract": w.get("outputContract", [])}
+    out = {"id": w["id"], "name": w["name"], "description": w["description"],
+           "builtin": w.get("builtin"), "createdBy": w.get("createdBy"),
+           "profile": w.get("profile"), "needsAuth": w.get("needsAuth"),
+           "params": [{"name": p["name"], "label": p.get("label"), "type": p["type"],
+                       "required": p.get("required", False), "default": p.get("default"),
+                       "help": p.get("help", ""), "options": p.get("options")} for p in w.get("params", [])],
+           "inputContract": w.get("inputContract", []), "outputContract": w.get("outputContract", [])}
+    if w.get("deprecated"):
+        out["deprecated"] = True
+        out["deprecationReason"] = w.get("deprecationReason") or ""
+        out["deprecationAdvice"] = DEPRECATION_ADVICE
+    return out
 
 
 def t_list_workflows(_a):
@@ -197,7 +226,10 @@ def t_run_workflow(a):
         body["attachPort"] = CONTROL_PORT_INT
     d = _api("POST", "/api/runs", body)
     run = d.get("run") or {}
-    return {"runId": run.get("id"), "status": run.get("status"), "error": d.get("error")}
+    out = {"runId": run.get("id"), "status": run.get("status"), "error": d.get("error")}
+    if d.get("warning"):        # e.g. the workflow is deprecated / unverified
+        out["warning"] = d["warning"]
+    return out
 
 
 def _run_brief(run: dict) -> dict:
@@ -242,8 +274,11 @@ def t_schedule_workflow(a):
             "timeoutSec": a.get("timeoutSec")}
     d = _api("POST", "/api/runs", body)
     run = d.get("run") or {}
-    return {"runId": run.get("id"), "status": run.get("status"), "startAt": run.get("startAt"),
-            "everySeconds": run.get("everySeconds"), "error": d.get("error")}
+    out = {"runId": run.get("id"), "status": run.get("status"), "startAt": run.get("startAt"),
+           "everySeconds": run.get("everySeconds"), "error": d.get("error")}
+    if d.get("warning"):
+        out["warning"] = d["warning"]
+    return out
 
 
 def t_schedule_wake(a):
@@ -1016,7 +1051,7 @@ def t_browser_file_chooser(a):
 
 
 STUDIO_TOOLS = [
-    ("studio_list_workflows", "List all workflows with their full settings: params (name/label/type/required/default/options), input & output contracts, profile, needsAuth, and whether each is a read-only built-in or a user/agent workflow.",
+    ("studio_list_workflows", "List all workflows with their full settings: params (name/label/type/required/default/options), input & output contracts, profile, needsAuth, and whether each is a read-only built-in or a user/agent workflow. CHECK `deprecated`: a workflow carrying it is unverified against its target site and comes with `deprecationAdvice` telling you what to do instead — read it before choosing that workflow.",
      {"type": "object", "properties": {}}, t_list_workflows),
     ("studio_get_workflow", "Get one workflow's full settings AND its Python source code (set includeSource=false to skip). Reading a built-in's code is a great way to learn how to drive a platform — e.g. read the LinkedIn workflows to see exactly how the browser is navigated, then apply the same patterns yourself.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}, "includeSource": {"type": "boolean"}}, "required": ["workflowId"]}, t_get_workflow),
@@ -1053,7 +1088,7 @@ STUDIO_TOOLS = [
                                        "icon": {"type": "string"}, "timeoutSec": {"type": "integer"}}, "required": ["name", "code"]}, t_create_workflow),
     ("studio_workflow_source", "Read a workflow's Python source — works for user/agent AND built-in workflows. Use studio_get_workflow for source + settings together.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}}, "required": ["workflowId"]}, t_workflow_source),
-    ("studio_run_workflow", "Start a workflow run. Defaults to this agent's own profile. Browser agents must use their assigned profile and the run shares the agent's browser. Bind datasetId to auto-append the result on success. For list-consuming workflows (those with an input contract, e.g. url-titles), set inputDatasetId to feed a dataset of rows as input. timeoutSec overrides this run's timeout. Returns runId.",
+    ("studio_run_workflow", "Start a workflow run. Check the workflow is not `deprecated` first (studio_list_workflows) — deprecated ones are unverified against their site and usually fail silently; the response carries a `warning` when you start one anyway. Defaults to this agent's own profile. Browser agents must use their assigned profile and the run shares the agent's browser. Bind datasetId to auto-append the result on success. For list-consuming workflows (those with an input contract, e.g. url-titles), set inputDatasetId to feed a dataset of rows as input. timeoutSec overrides this run's timeout. Returns runId.",
      {"type": "object", "properties": {"workflowId": {"type": "string"}, "params": {"type": "object"},
                                        "profileId": {"type": "string"}, "datasetId": {"type": "string"},
                                        "inputDatasetId": {"type": "string"}, "watch": {"type": "boolean"},

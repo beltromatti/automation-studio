@@ -44,6 +44,7 @@ export default function WorkflowPage() {
             <Icon name="chevronRight" size={14} />
             {workflow.name}
             {!workflow.builtin && <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#0072f518", color: "#3b9eff" }}>{workflow.createdBy === "agent" ? "agent-made" : "custom"}</span>}
+            {workflow.deprecated && <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#ff5c5c18", color: "#ff8d8d" }}>deprecated</span>}
           </span>
         }
         sub={workflow.builtin ? workflow.module : `custom · ${workflow.module}`}
@@ -56,6 +57,18 @@ export default function WorkflowPage() {
       />
       <div className="px-7 py-6 max-w-[1000px]">
         <p className="text-[13px] text-muted max-w-[620px] leading-relaxed mb-5">{workflow.description}</p>
+        {workflow.deprecated && (
+          <div className="max-w-[620px] mb-5 rounded-lg px-3.5 py-3 text-[12.5px] flex items-start gap-2.5"
+               style={{ background: "#ff5c5c10", color: "#ff8d8d", border: "1px solid #4a2424" }}>
+            <Icon name="alert" size={15} />
+            <span>
+              <span className="font-medium">Deprecated — don’t trust the result without checking it.</span>{" "}
+              {workflow.deprecationReason} It still runs, and the code is kept as the reference for driving this
+              site, but the usual failure here is a <em>silent</em> one: the run finishes green and the output is
+              empty or wrong. Run it on a small batch and read the result before relying on it.
+            </span>
+          </div>
+        )}
         <RunForm workflow={workflow} />
 
         {runs.length > 0 && (

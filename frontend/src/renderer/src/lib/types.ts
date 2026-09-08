@@ -69,6 +69,10 @@ export interface WorkflowDef {
   inputContract?: ContractColumn[]; // when set, consumes a dataset of these columns as input
   builtin?: boolean; // false for user/agent-authored workflows
   createdBy?: string; // "builtin" | "user" | "agent"
+  /** Kept and runnable, but not revalidated against the site it drives — its
+   *  typical failure is silent (green run, empty or wrong result). */
+  deprecated?: boolean;
+  deprecationReason?: string;
   buildArgs: (p: Record<string, unknown>) => string[];
 }
 

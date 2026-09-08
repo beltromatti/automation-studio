@@ -59,6 +59,13 @@ class WorkflowDef:
     builtin: bool = True
     path: str | None = None          # source .py file for user/agent workflows
     created_by: str = "builtin"      # "builtin" | "user" | "agent"
+    # DEPRECATION. A workflow that drives someone else's site rots the moment that
+    # site changes its DOM, and it rots SILENTLY: it still runs, still exits 0, and
+    # just returns nothing (or acts on the wrong element). Rather than delete these
+    # — the code and its hard-won site knowledge stay valuable — we flag them so the
+    # UI and agents know to treat them as unverified until someone revalidates them.
+    deprecated: bool = False
+    deprecation_reason: str = ""     # why, in one human sentence
 
     @property
     def target(self) -> str:
@@ -92,6 +99,16 @@ def _linkedin_argv(p: dict) -> list[str]:
     argv.extend(["-n", str(int(p.get("limit", 25) or 25))])
     return argv
 
+
+# Why the site-driving workflows below are flagged. They are NOT broken by
+# definition — they are simply unverified against the sites' current markup, and
+# that is exactly the failure mode that looks like success: the run completes, the
+# CSV is empty or half-wrong, and nobody notices. Kept in the tree because the
+# code (search-URL construction, bilingual selectors, pacing, interstitial
+# handling) is the best reference we have for driving these platforms.
+_STALE_DOM = ("Not revalidated against {site}'s current markup, so it may silently "
+              "return nothing, act on the wrong element or produce partial results. "
+              "Needs a review and refresh before it can be trusted again.")
 
 WORKFLOWS: list[WorkflowDef] = [
     WorkflowDef(
@@ -170,6 +187,8 @@ WORKFLOWS: list[WorkflowDef] = [
             {"name": "contact_info", "type": "text"}, {"name": "services", "type": "text"},
             {"name": "extra", "type": "text"},
         ],
+        deprecated=True,
+        deprecation_reason=_STALE_DOM.format(site="LinkedIn"),
     ),
     # Demonstrates dataset-as-input: consumes a list of URLs and fetches each page's
     # title. Same shape as a "connect each profile" / "message each lead" workflow,
@@ -216,6 +235,8 @@ WORKFLOWS: list[WorkflowDef] = [
         input_contract=[{"name": "profile_url", "type": "text"}],
         output_contract=[{"name": "profile_url", "type": "text"}, {"name": "name", "type": "text"},
                          {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
+        deprecated=True,
+        deprecation_reason=_STALE_DOM.format(site="LinkedIn"),
     ),
     # List-consuming outreach workflow: message each 1st-degree CONNECTION. The third
     # half of the people→connect→message pipeline — feed it any dataset with a
@@ -291,6 +312,8 @@ WORKFLOWS: list[WorkflowDef] = [
                         {"name": "media", "type": "file_list"}],
         output_contract=[{"name": "community", "type": "text"}, {"name": "post_url", "type": "text"},
                          {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
+        deprecated=True,
+        deprecation_reason=_STALE_DOM.format(site="Reddit"),
     ),
     WorkflowDef(
         id="linkedin-messages",
@@ -335,6 +358,8 @@ WORKFLOWS: list[WorkflowDef] = [
                         {"name": "media", "type": "file_list"}],
         output_contract=[{"name": "profile_url", "type": "text"}, {"name": "name", "type": "text"},
                          {"name": "status", "type": "text"}, {"name": "detail", "type": "text"}],
+        deprecated=True,
+        deprecation_reason=_STALE_DOM.format(site="LinkedIn"),
     ),
 ]
 
@@ -357,6 +382,8 @@ def _def_from_meta(m: dict) -> WorkflowDef:
         output_contract=m.get("outputContract", []), build_argv=_user_argv,
         input_contract=m.get("inputContract", []),
         builtin=False, created_by=m.get("createdBy", "user"),
+        deprecated=bool(m.get("deprecated")),
+        deprecation_reason=str(m.get("deprecationReason") or ""),
         path=str(USER_DIR / m["file"]),
     )
 
@@ -449,6 +476,8 @@ def save_user_workflow(body: dict) -> dict:
         "timeoutSec": _normalize_timeout(body.get("timeoutSec")),
         "params": _normalize_params(body.get("params", [])), "outputContract": body.get("outputContract", []),
         "inputContract": body.get("inputContract", []),
+        "deprecated": bool(body.get("deprecated")),
+        "deprecationReason": str(body.get("deprecationReason") or ""),
         "file": file, "createdBy": body.get("createdBy", "user"),
         "createdAt": (existing or {}).get("createdAt") or time.time(), "updatedAt": time.time(),
     }
@@ -538,4 +567,5 @@ def public_workflow(w: WorkflowDef) -> dict:
         "outputContract": w.output_contract,
         "inputContract": w.input_contract,
         "builtin": w.builtin, "createdBy": w.created_by,
+        "deprecated": w.deprecated, "deprecationReason": w.deprecation_reason,
     }

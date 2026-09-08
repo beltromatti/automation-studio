@@ -27,7 +27,8 @@ export default function Overview() {
           {workflows.map((w) => {
             const last = runs.find((r) => r.workflowId === w.id);
             return (
-              <div key={w.id} className="card card-hover p-5 flex flex-col">
+              <div key={w.id} className="card card-hover p-5 flex flex-col"
+                   style={w.deprecated ? { borderColor: "#4a2424" } : undefined}>
                 <div className="flex items-start gap-3">
                   <div className="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" style={{ background: "#161616", border: "1px solid var(--color-line)" }}>
                     <Icon name={w.icon} size={19} />
@@ -43,8 +44,17 @@ export default function Overview() {
                       {w.needsAuth && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "#f5a62318", color: "#f5a623" }}>uses login</span>
                       )}
+                      {w.deprecated && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded" title={w.deprecationReason}
+                              style={{ background: "#ff5c5c18", color: "#ff8d8d" }}>deprecated</span>
+                      )}
                     </div>
                     <p className="text-[12.5px] text-muted mt-1 leading-relaxed line-clamp-2">{w.description}</p>
+                    {w.deprecated && (
+                      <p className="text-[11.5px] mt-1.5 leading-relaxed" style={{ color: "#ff8d8d" }}>
+                        {w.deprecationReason}
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center justify-between mt-4 pt-4 border-t" style={{ borderColor: "var(--color-line)" }}>
@@ -54,7 +64,7 @@ export default function Overview() {
                     {!w.builtin && (
                       <button className="btn btn-secondary btn-sm" title="Delete" onClick={async () => { if (confirm(`Delete workflow "${w.name}"?`)) { await jdel(`/api/workflows/${w.id}`); load(); } }}><Icon name="trash" size={13} /></button>
                     )}
-                    <Link to={`/workflows/${w.id}`} className="btn btn-primary btn-sm"><Icon name="play" size={13} /> Run</Link>
+                    <Link to={`/workflows/${w.id}`} className={`btn btn-sm ${w.deprecated ? "btn-secondary" : "btn-primary"}`}><Icon name="play" size={13} /> Run</Link>
                   </div>
                 </div>
               </div>

@@ -52,15 +52,21 @@ One painless install gives you three things that compose into something much big
 
 ## 📦 Built-in workflows
 
-Out of the box, with the **LinkedIn growth suite** as the flagship — three workflows that chain into one pipeline: **search → connect → message**.
+| Workflow | What it does | |
+|---|---|---|
+| 🔎 **Google Search** | Autonomous, human-grade Google search — handles the consent wall, types like a person, paginates, returns ranked results. | |
+| 🌍 **Page Titles** | Feed it a list of URLs, get each page's title back — the simplest example of a list-consuming, chainable workflow. | |
+| 🖼️ **Media Metadata** | Reads dimensions, mime and size for a list of stored files. | |
+| 👥 **LinkedIn People** | Turns a people search into an enriched lead dataset with the *exact* targeting of LinkedIn's own filters (title, company, school, location, industry, connection degree, language). | ⚠️ deprecated |
+| 🤝 **LinkedIn Connections** | Sends connection requests to a list of profiles — human-paced, resilient to LinkedIn's interstitials, skips already-connected / pending, never spams. | ⚠️ deprecated |
+| ✉️ **LinkedIn Messages** | Messages your 1st-degree connections, with **per-recipient personalization** — one message, several to alternate, or a custom line for every lead. | ⚠️ deprecated |
+| 📣 **Reddit Posts** | Publishes a post (text, or text + media) into each of a list of communities, one at a time and human-paced. | ⚠️ deprecated |
 
-| Workflow | What it does |
-|---|---|
-| 🔎 **Google Search** | Autonomous, human-grade Google search — handles the consent wall, types like a person, paginates, returns ranked results. |
-| 👥 **LinkedIn People** | Turns a people search into an enriched lead dataset with the *exact* targeting of LinkedIn's own filters (title, company, school, location, industry, connection degree, language). |
-| 🤝 **LinkedIn Connections** | Sends connection requests to a list of profiles — human-paced, resilient to LinkedIn's interstitials, skips already-connected / pending, never spams. |
-| ✉️ **LinkedIn Messages** | Messages your 1st-degree connections, with **per-recipient personalization** — one message, several to alternate, or a custom line for every lead. |
-| 🌍 **Page Titles** | Feed it a list of URLs, get each page's title back — the simplest example of a list-consuming, chainable workflow. |
+> **About the deprecated ones.** They drive sites that change constantly, and they have not been revalidated against the
+> current markup — so their typical failure is a *silent* one: the run finishes green and the result is empty or wrong.
+> They are kept, not deleted: the code is the best reference we have for driving those platforms, and they will be
+> reviewed and refreshed. Until then the app flags them, and agents are told to do the task live in the browser instead
+> and to read the workflow's source rather than run it.
 
 > Build your own just as easily: drop a Python module in `automations/`, register it, and it shows up in the app — list-consuming and chainable by default.
 
@@ -73,7 +79,7 @@ Agents are the headline act. They run on **your own [Claude Code](https://claude
 Four specialists ship built-in:
 
 - 🛠️ **Studio Agent** — the complete operator. Builds & runs workflows, shapes the data layer, drives the browser, schedules work. Point it at anything.
-- 💼 **LinkedIn Specialist** — deep LinkedIn mastery: the search→connect→message pipeline plus live navigation, fluent in all of LinkedIn's quirks.
+- 💼 **LinkedIn Specialist** — deep LinkedIn mastery: drives the site live, step by step, fluent in all of its quirks (SDUI, bilingual labels, duplicate action bars, interstitials).
 - 📈 **Client Acquisition Lead** — a B2B business-development partner. It sharpens your ideal customer, finds prospects across LinkedIn, Google/Maps, websites, directories and niche sources, enriches them with verified contact paths, runs approved multi-channel outreach and follow-up, and advises on sales strategy.
 - 📣 **Social Growth Lead** — a social media growth operator. It plans organic or paid distribution across LinkedIn, Reddit, X, Instagram, TikTok, Facebook and niche communities, publishes approved channel-native content, monitors real traffic and engagement metrics, and keeps iterating over hours or days.
 
