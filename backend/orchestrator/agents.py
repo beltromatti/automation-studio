@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -28,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from humanbrowser.config import data_dir
+from . import engines
 from .manager import get_manager, _self_base, kill_tree, is_ephemeral
 
 DATA = data_dir()
@@ -42,11 +45,13 @@ MAX_NATIVE_THREAD_INPUT_TOKENS = 10_000_000
 
 ENGINES = {"codex", "claude"}
 
-# Model + reasoning effort each engine runs at (the most capable settings).
-CODEX_MODEL = "gpt-5.5"
-CODEX_EFFORT = "xhigh"        # codex: model_reasoning_effort (minimal|low|medium|high|xhigh)
-CLAUDE_MODEL = "claude-opus-4-7"
-CLAUDE_EFFORT = "max"        # claude: --effort (low|medium|high|max)
+IS_WIN = os.name == "nt" or sys.platform.startswith("win")
+# Windows caps a whole command line at 32,767 characters; stay well under it.
+WIN_CMDLINE_BUDGET = 24_000
+
+# Models and reasoning efforts are NEVER hardcoded here: they are fetched from the
+# installed CLIs themselves (orchestrator.engines) and chosen per session, exactly
+# like picking a model in Codex or Claude Code directly.
 
 
 def _find_binary(engine: str) -> str | None:
@@ -103,11 +108,81 @@ class AgentSession:
     ackedRuns: list[str] = field(default_factory=list)
     scheduledAt: float | None = None  # when status == "scheduled": the future wake time
     scheduledPrompt: str | None = None  # the prompt to wake with at scheduledAt
+    # Engine model + reasoning effort for the NEXT turn. Both are ids the installed
+    # CLI advertises (see orchestrator.engines) — never a hardcoded name — and the
+    # user can change them mid-conversation exactly like /model in Codex or Claude
+    # Code: the native thread is kept, the new setting applies from the next turn.
+    model: str = ""
+    effort: str = ""
+    # Text the engine had STREAMED but never committed to its own native session
+    # before it was killed (a stop, or a preempt to deliver a notification). The
+    # engine's thread has no memory of it; ours does, so the next turn replays it
+    # as context and the conversation stays coherent instead of restarting blind.
+    interruptedTail: str = ""
 
 
 # ------------------------------------------------------------------ normalisation
+# Both engines are reduced to ONE event taxonomy the UI renders:
+#   system | status | message | reasoning | tool_call | tool_result | usage | error
+# Internal, never persisted: _text_delta / _reasoning_delta (per-token streaming)
+# and _msg_start (ties a stream of deltas to the assistant message it belongs to).
+#
+# Tool calls carry a `callId` and results echo it, so a result is always matched
+# to the RIGHT call — Claude and Codex both issue tool calls in parallel, and a
+# positional (FIFO) pairing mis-attributes results as soon as they interleave.
+
+
+def _codex_tool_event(t: str, it: dict) -> list[dict]:
+    """One Codex item.* event for a tool-ish item → tool_call / tool_result."""
+    itype = it.get("type")
+    cid = it.get("id")
+    started, done = t == "item.started", t == "item.completed"
+    if itype == "mcp_tool_call":
+        if started:
+            return [{"kind": "tool_call", "tool": it.get("tool"), "args": it.get("arguments"),
+                     "server": it.get("server"), "callId": cid}]
+        if done:
+            return [{"kind": "tool_result", "tool": it.get("tool"), "callId": cid,
+                     "ok": it.get("status") != "failed",
+                     "result": _short(it.get("result") or (it.get("error") or {}).get("message"))}]
+    elif itype == "command_execution":
+        if started:
+            return [{"kind": "tool_call", "tool": "shell", "callId": cid,
+                     "args": {"command": it.get("command")}}]
+        if done:
+            return [{"kind": "tool_result", "tool": "shell", "callId": cid,
+                     "ok": it.get("exit_code") == 0,
+                     "result": _short(it.get("aggregated_output"))}]
+    elif itype == "file_change":
+        # Codex edits files through its own apply-patch item; surface it like any
+        # other tool so the transcript shows what it touched.
+        changes = it.get("changes") or []
+        paths = [c.get("path") for c in changes if isinstance(c, dict) and c.get("path")]
+        if started:
+            return [{"kind": "tool_call", "tool": "edit_files", "callId": cid,
+                     "args": {"paths": paths or None, "changes": len(changes) or None}}]
+        if done:
+            return [{"kind": "tool_result", "tool": "edit_files", "callId": cid,
+                     "ok": (it.get("status") or "completed") not in ("failed", "error"),
+                     "result": _short(paths or it.get("status") or "applied")}]
+    elif itype == "web_search":
+        if started:
+            return [{"kind": "tool_call", "tool": "web_search", "callId": cid,
+                     "args": {"query": it.get("query")}}]
+        if done:
+            return [{"kind": "tool_result", "tool": "web_search", "callId": cid, "ok": True,
+                     "result": _short(it.get("query"))}]
+    return []
+
+
 def _norm_codex(obj: dict) -> list[dict]:
-    """Codex `exec --json` JSONL → normalised events."""
+    """Codex `exec --json` JSONL → normalised events.
+
+    Codex does not stream partial text: an `agent_message` / `reasoning` item only
+    materialises at item.completed (its per-token deltas exist only on the
+    experimental app-server protocol). Everything else — tool calls, shell, file
+    edits, plans, web search — streams as started/completed pairs.
+    """
     t = obj.get("type", "")
     out: list[dict] = []
     if t == "thread.started":
@@ -123,87 +198,135 @@ def _norm_codex(obj: dict) -> list[dict]:
         itype = it.get("type")
         done = t == "item.completed"
         if itype == "agent_message":
-            if done:
+            if done and (it.get("text") or "").strip():
                 out.append({"kind": "message", "text": it.get("text", "")})
         elif itype == "reasoning":
-            if done:
+            if done and (it.get("text") or "").strip():
                 out.append({"kind": "reasoning", "text": it.get("text", "")})
-        elif itype == "mcp_tool_call":
-            if t == "item.started":
-                out.append({"kind": "tool_call", "tool": it.get("tool"), "args": it.get("arguments"),
-                            "server": it.get("server")})
-            elif done:
-                out.append({"kind": "tool_result", "tool": it.get("tool"),
-                            "ok": it.get("status") != "failed",
-                            "result": _short(it.get("result") or (it.get("error") or {}).get("message"))})
-        elif itype == "command_execution":
-            if t == "item.started":
-                out.append({"kind": "tool_call", "tool": "shell", "args": {"command": it.get("command")}})
-            elif done:
-                out.append({"kind": "tool_result", "tool": "shell", "ok": it.get("exit_code") == 0,
-                            "result": _short(it.get("aggregated_output"))})
-        elif itype == "web_search":
-            if done:
-                out.append({"kind": "tool_call", "tool": "web_search", "args": {"query": it.get("query")}})
         elif itype in ("todo_list", "plan_update"):
+            # live plan: Codex re-emits the whole list on every update, so give it a
+            # stable id and let the UI replace the row in place instead of stacking.
+            items = it.get("items") or []
+            if items:
+                out.append({"kind": "status", "status": "plan", "id": f"plan-{it.get('id') or '0'}",
+                            "text": " · ".join(
+                                f"{'✓' if i.get('completed') else '○'} {i.get('text', '')}" for i in items)})
+        elif itype == "error":
+            # An error ITEM is Codex talking to the user mid-turn (a model-metadata
+            # notice, a resume-with-a-different-model warning, a tool that blew up).
+            # It is NOT necessarily fatal — `turn.failed` is — so surface it as a
+            # visible note rather than failing the turn.
+            msg = it.get("message") or it.get("text") or "error"
             if done:
-                items = it.get("items") or []
-                out.append({"kind": "status", "status": "plan",
-                            "text": " · ".join(f"{'✓' if i.get('completed') else '○'} {i.get('text','')}" for i in items)})
+                out.append({"kind": "system", "text": f"⚠ {msg}", "level": "warn"})
+        else:
+            out.extend(_codex_tool_event(t, it))
     elif t == "error":
         out.append({"kind": "error", "text": obj.get("message", "error")})
     return out
 
 
-def _norm_claude(obj: dict) -> list[dict]:
-    """Claude `-p --output-format stream-json [--include-partial-messages]` → normalised events.
+# Claude system notices that are worth showing but must not fail the turn.
+_CLAUDE_WARN_SUBTYPES = {
+    "model_fallback": "switched to a fallback model",
+    "model_refusal_fallback": "the model declined; retried on a fallback model",
+    "model_refusal_no_fallback": "the model declined and no fallback was available",
+    "model_consent_fallback": "switched model (consent)",
+}
 
-    With --include-partial-messages, Claude emits `stream_event` lines with per-token
-    `content_block_delta` events whose `delta.type == "text_delta"` carries the next
-    text chunk. We surface those as an INTERNAL `_text_delta` event with the block
-    `idx` and the chunk — _run_turn accumulates them per-block, emitting an id-stable
-    `message` event with `partial: True` that the UI replaces in place. The canonical
-    `assistant` event arrives at block completion with the full text; we tag each text
-    block with `_block_idx` so _run_turn can attach the SAME id, replacing the partial
-    with the final (the only one we persist)."""
+
+def _norm_claude(obj: dict) -> list[dict]:
+    """Claude `-p --output-format stream-json --include-partial-messages` → events.
+
+    Real per-token streaming: `stream_event` lines carry `content_block_delta`s
+    whose `text_delta` / `thinking_delta` hold the next chunk. We surface those as
+    INTERNAL `_text_delta` / `_reasoning_delta` events carrying the block index;
+    `_run_turn` accumulates per (message, block) and emits an id-stable PARTIAL
+    event the UI replaces in place. The canonical block arrives in the `assistant`
+    event with the full text; we tag it with the SAME `_block_idx` + `_msg_id` so
+    it replaces the partial (and it is the only one we persist).
+    """
     t = obj.get("type")
     out: list[dict] = []
-    if t == "system" and obj.get("subtype") == "init":
-        out.append({"kind": "system", "text": f"session started ({obj.get('model','')})",
-                    "threadId": obj.get("session_id")})
+    if t == "system":
+        sub = obj.get("subtype")
+        if sub == "init":
+            out.append({"kind": "system", "text": f"session started ({obj.get('model', '')})",
+                        "threadId": obj.get("session_id")})
+        elif sub == "compact_boundary":
+            # Claude Code auto-compacted its own context mid-session. The native
+            # thread stays resumable and our transcript is untouched — this is the
+            # engine keeping itself inside its window, so say so plainly.
+            meta = obj.get("compact_metadata") or obj.get("compactMetadata") or {}
+            n = meta.get("messages_summarized") or meta.get("messagesSummarized")
+            detail = f" ({n} messages summarised)" if n else ""
+            out.append({"kind": "system", "level": "info", "compact": True,
+                        "text": f"↻ Claude compacted its context{detail} — the conversation continues."})
+        elif sub in _CLAUDE_WARN_SUBTYPES:
+            extra = obj.get("fallback_model") or obj.get("fallbackModel") or ""
+            out.append({"kind": "system", "level": "warn",
+                        "text": f"⚠ {_CLAUDE_WARN_SUBTYPES[sub]}{f': {extra}' if extra else ''}"})
+        elif sub == "status":
+            st = str(obj.get("status") or "")
+            if st == "compacting":
+                # the engine is summarising its own history to stay inside the
+                # context window — worth showing, it explains a long pause
+                out.append({"kind": "status", "status": "compacting",
+                            "text": "compacting context to stay within the window"})
+            # "requesting" fires before every single API call — pure noise in a
+            # transcript that already shows the session as running. Drop it.
     elif t == "stream_event":
         ev = obj.get("event") or {}
-        if ev.get("type") == "content_block_delta":
+        et = ev.get("type")
+        if et == "message_start":
+            mid = ((ev.get("message") or {}).get("id")) or ""
+            out.append({"kind": "_msg_start", "msgId": mid})
+        elif et == "content_block_start":
+            out.append({"kind": "_block_start", "idx": int(ev.get("index", 0)),
+                        "blockType": (ev.get("content_block") or {}).get("type") or ""})
+        elif et == "content_block_delta":
             d = ev.get("delta") or {}
-            if d.get("type") == "text_delta":
-                chunk = d.get("text") or ""
-                if chunk:
-                    out.append({"kind": "_text_delta", "idx": int(ev.get("index", 0)), "chunk": chunk})
+            dt = d.get("type")
+            idx = int(ev.get("index", 0))
+            if dt == "text_delta" and d.get("text"):
+                out.append({"kind": "_text_delta", "idx": idx, "chunk": d["text"]})
+            elif dt == "thinking_delta" and d.get("thinking"):
+                out.append({"kind": "_reasoning_delta", "idx": idx, "chunk": d["thinking"]})
     elif t == "assistant":
-        for i, b in enumerate((obj.get("message") or {}).get("content", [])):
-            if b.get("type") == "text" and b.get("text", "").strip():
-                # _block_idx ties this canonical/final message to any partials emitted
-                # for the same block index during streaming
-                out.append({"kind": "message", "text": b["text"], "_block_idx": i})
-            elif b.get("type") == "tool_use":
+        # NOTE: Claude Code emits ONE assistant event per completed content block,
+        # each carrying only that block — so the position within this event is NOT
+        # the block's index in the message. `_block_idx` is therefore only a
+        # fallback; _run_turn prefers the index it saw on content_block_start.
+        msg = obj.get("message") or {}
+        mid = msg.get("id") or ""
+        for i, b in enumerate(msg.get("content", [])):
+            bt = b.get("type")
+            if bt == "text" and b.get("text", "").strip():
+                out.append({"kind": "message", "text": b["text"], "_block_idx": i, "_msg_id": mid})
+            elif bt == "thinking" and (b.get("thinking") or "").strip():
+                out.append({"kind": "reasoning", "text": b["thinking"], "_block_idx": i, "_msg_id": mid})
+            elif bt == "tool_use":
                 name = b.get("name") or ""
                 if name.startswith("mcp__studio__"):
                     name = name[len("mcp__studio__"):]  # show studio_/browser_ like Codex does
-                out.append({"kind": "tool_call", "tool": name, "args": b.get("input")})
-            elif b.get("type") == "thinking" and b.get("thinking"):
-                out.append({"kind": "reasoning", "text": b.get("thinking")})
+                out.append({"kind": "tool_call", "tool": name, "args": b.get("input"),
+                            "callId": b.get("id")})
     elif t == "user":
         for b in (obj.get("message") or {}).get("content", []):
             if isinstance(b, dict) and b.get("type") == "tool_result":
                 c = b.get("content")
                 txt = c if isinstance(c, str) else json.dumps(c, default=str)
-                out.append({"kind": "tool_result", "tool": "", "ok": not b.get("is_error"),
-                            "result": _short(txt)})
+                out.append({"kind": "tool_result", "tool": "", "callId": b.get("tool_use_id"),
+                            "ok": not b.get("is_error"), "result": _short(txt)})
     elif t == "result":
         out.append({"kind": "usage", "usage": {"total_cost_usd": obj.get("total_cost_usd"),
                                                **(obj.get("usage") or {})}})
-        if obj.get("result") and obj.get("subtype") != "success":
-            out.append({"kind": "error", "text": str(obj.get("result"))[:500]})
+        # `is_error` is the authoritative failure flag: Claude Code reports an API
+        # failure (e.g. an unusable model) with subtype "success" but is_error true.
+        if obj.get("is_error") or obj.get("api_error_status"):
+            msg = str(obj.get("result") or obj.get("error") or "the turn failed")
+            st = obj.get("api_error_status")
+            out.append({"kind": "error", "text": (f"[{st}] " if st else "") + msg[:600]})
     elif t == "rate_limit_event":
         # Claude Code streams this EVERY turn to report your subscription window;
         # status "allowed" is the normal case (NOT a throttle) — stay silent. Only
@@ -221,9 +344,11 @@ def _norm_claude(obj: dict) -> list[dict]:
             kind = (info.get("rateLimitType") or "usage").replace("_", "-")
             if st in ("rejected", "blocked", "exceeded"):
                 out.append({"kind": "status", "status": "rate-limited"})
-                out.append({"kind": "system", "text": f"Claude {kind} usage limit reached{when}."})
+                out.append({"kind": "system", "level": "warn",
+                            "text": f"Claude {kind} usage limit reached{when}."})
             else:  # e.g. allowed_warning — approaching the limit, not blocked
-                out.append({"kind": "system", "text": f"Approaching your Claude {kind} usage limit{when}."})
+                out.append({"kind": "system", "level": "warn",
+                            "text": f"Approaching your Claude {kind} usage limit{when}."})
     return out
 
 
@@ -661,24 +786,39 @@ class _Stopped(Exception):
 
 
 def _extract_run_id(result: Any) -> str | None:
-    """A studio_run_workflow tool result may arrive as plain JSON (Claude) or
-    wrapped in MCP {content:[{text}]} (Codex). Dig out runId either way."""
+    """Dig a runId out of a studio_run_workflow tool result.
+
+    The same MCP payload reaches us in three shapes: plain JSON, wrapped as
+    ``{content: [{text}]}`` (Codex), or as the bare content list ``[{text}]``
+    (Claude). Handle all of them, and tolerate a result our own display cap
+    truncated by falling back to a scan for the id.
+    """
     if not result:
         return None
     try:
         obj = json.loads(result) if isinstance(result, str) else result
     except Exception:
-        return None
-    if isinstance(obj, dict):
-        if obj.get("runId"):
-            return obj["runId"]
-        content = obj.get("content")
-        if isinstance(content, list) and content and isinstance(content[0], dict):
-            try:
-                inner = json.loads(content[0].get("text") or "{}")
-                return inner.get("runId")
-            except Exception:
-                return None
+        obj = None
+    seen: list[Any] = [obj]
+    while seen:
+        cur = seen.pop()
+        if isinstance(cur, dict):
+            if cur.get("runId"):
+                return str(cur["runId"])
+            if isinstance(cur.get("content"), list):
+                seen.extend(cur["content"])
+            if isinstance(cur.get("text"), str):
+                try:
+                    seen.append(json.loads(cur["text"]))
+                except Exception:
+                    pass
+        elif isinstance(cur, list):
+            seen.extend(cur)
+    # last resort: the result was truncated mid-JSON, but the id is still in there
+    if isinstance(result, str):
+        m = re.search(r'"runId"\s*:\s*"([A-Za-z0-9_-]+)"', result)
+        if m:
+            return m.group(1)
     return None
 
 
@@ -727,13 +867,18 @@ class AgentManager:
         # (NOT persisted — only meaningful while a turn is alive):
         # _tool_in_flight: count of tool_call events without a matching tool_result yet.
         #   When 0 → it's a safe boundary to preempt for a pending notification.
-        # _pending_call: FIFO of (tool_name, args) per outstanding tool_call, popped on
-        #   the next tool_result so we can ack the run inline.
+        # _pending_call: outstanding tool_calls keyed by the engine's own call id, so
+        #   a result is paired with the RIGHT call even when tools run in parallel
+        #   (both engines do); popped on its tool_result to ack the run inline.
         # _preempt_chain: when set, the post-turn-loop will chain into a new turn with
         #   this wake prompt (set by _preempt_now during the event loop).
         self._tool_in_flight: dict[str, int] = {}
-        self._pending_call: dict[str, list[tuple[str | None, dict]]] = {}
+        self._pending_call: dict[str, dict[str, tuple[str | None, dict]]] = {}
         self._preempt_chain: dict[str, str] = {}
+        # set by the turn loop once a killed turn has flushed whatever the engine
+        # had streamed but not yet finished — stop() waits on it so the transcript
+        # keeps the partial text ABOVE the "stopped" marker instead of after it.
+        self._turn_flushed: dict[str, asyncio.Event] = {}
         # Per-session event subscribers (asyncio Queues) for the SSE stream — pushed
         # whenever _emit appends an event so the UI renders in real time.
         self._subscribers: dict[str, list[asyncio.Queue]] = {}
@@ -937,7 +1082,8 @@ class AgentManager:
 
     def launch(self, agent_id: str, profile_id: str, prompt: str, watch: bool = False,
                engine: str = "codex", start_at: float | None = None,
-               file_ids: list[str] | None = None) -> AgentSession:
+               file_ids: list[str] | None = None,
+               model: str | None = None, effort: str | None = None) -> AgentSession:
         d = self.defs.get(agent_id)
         if not d:
             raise ValueError(f"unknown agent: {agent_id}")
@@ -959,6 +1105,9 @@ class AgentManager:
             profile_name = prof["name"]
         sid = uuid.uuid4().hex[:8]
         scheduled = bool(start_at) and start_at > time.time() + 1
+        # Normalise against what the INSTALLED CLI advertises right now; an unknown
+        # or omitted model/effort falls back to that engine's own default.
+        model, effort = engines.resolve(engine, model, effort)
         # Decorate the prompt with an attached-files preamble the engine sees as
         # part of its FIRST message (and the user sees in the transcript). The
         # ids point at the Studio file store; the agent reaches them via
@@ -969,7 +1118,8 @@ class AgentManager:
                          status="scheduled" if scheduled else "starting",
                          createdAt=time.time(), watch=bool(watch),
                          scheduledAt=(start_at if scheduled else None),
-                         scheduledPrompt=(full_prompt if scheduled else None))
+                         scheduledPrompt=(full_prompt if scheduled else None),
+                         model=model, effort=effort)
         self.sessions[sid] = s
         self.events[sid] = []
         if scheduled:
@@ -1018,6 +1168,38 @@ class AgentManager:
             return {"ok": True, "removed": removed}
         return {"ok": False, "error": "no such queued message"}
 
+    def set_model(self, sid: str, model: str | None = None,
+                  effort: str | None = None) -> dict:
+        """Change the engine model and/or reasoning effort mid-conversation — the
+        wrapper equivalent of `/model` and `/effort` in Codex or Claude Code.
+
+        The native thread is KEPT: both CLIs accept a different `--model` /
+        `-m` on a resume and carry the full history across (Codex additionally
+        warns in-stream that the thread was recorded with another model, which we
+        surface). Like the real CLIs, the change takes effect on the NEXT request:
+        a turn already in flight finishes on the model it started with.
+        """
+        s = self.sessions.get(sid)
+        if not s:
+            return {"ok": False, "error": "no such session"}
+        want_model = s.model if model is None else str(model)
+        want_effort = s.effort if effort is None else str(effort)
+        new_model, new_effort = engines.resolve(s.engine, want_model, want_effort)
+        if model is not None and new_model != str(model).strip():
+            return {"ok": False, "error": f"{s.engine} doesn't offer the model \"{model}\""}
+        if effort is not None and new_effort != str(effort).strip():
+            return {"ok": False, "error": f"model {new_model} doesn't support effort \"{effort}\""}
+        if (new_model, new_effort) == (s.model, s.effort):
+            return {"ok": True, "model": s.model, "effort": s.effort, "changed": False}
+        was = f"{s.model or 'default'}·{s.effort or 'default'}"
+        s.model, s.effort = new_model, new_effort
+        now = f"{new_model}·{new_effort or 'default'}"
+        when = " — applies to the next turn" if s.status in _RUNNING else ""
+        self._emit(sid, {"kind": "system", "text": f"⚙ model {was} → {now}{when}"})
+        self._save_sessions()
+        return {"ok": True, "model": s.model, "effort": s.effort, "changed": True,
+                "appliesNextTurn": s.status in _RUNNING}
+
     async def stop(self, sid: str) -> dict:
         """User-initiated stop: behave like a NATURAL turn-end so the rest of the
         machine (notifications, reactivation) stays coherent. We kill the engine
@@ -1033,7 +1215,21 @@ class AgentManager:
         s.scheduledPrompt = None
         proc = self.procs.get(sid)
         if proc and proc.pid:
+            # register BEFORE the kill: the turn loop can reach its flush point
+            # within microseconds of the process dying, and would otherwise find
+            # no waiter and leave us sitting out the whole timeout for nothing.
+            flushed = asyncio.Event()
+            self._turn_flushed[sid] = flushed
             kill_tree(proc.pid)
+            # Let the turn loop notice the kill and commit any half-streamed
+            # message/reasoning first, so the transcript reads in the order it
+            # actually happened. Bounded — a wedged engine must never block stop.
+            try:
+                await asyncio.wait_for(flushed.wait(), timeout=5)
+            except Exception:
+                pass
+            finally:
+                self._turn_flushed.pop(sid, None)
         # the engine kill will trip the post-loop preempt/chain path; clear any chain
         self._preempt_chain.pop(sid, None)
         await self._release_browser(s)
@@ -1114,7 +1310,25 @@ class AgentManager:
             return False
 
     def _owned_active_runs(self, s: AgentSession) -> list[str]:
-        return [rid for rid in s.runIds if self._run_active(rid)]
+        """Runs this session launched that are still going.
+
+        The RunManager is the authority — every run carries the session that
+        started it — so a runId our transcript parsing happened to miss can never
+        make the agent think it has nothing running and release the profile lock
+        out from under its own workflow. `runIds` is folded in for runs the
+        manager has since forgotten (e.g. pruned across a restart).
+        """
+        rids = list(s.runIds)
+        try:
+            from .manager import get_manager as _gm
+            for rid, run in _gm().runs.items():
+                if run.agentId == s.id and rid not in rids:
+                    rids.append(rid)
+                    if run.status not in TERMINAL:
+                        s.runIds.append(rid)   # remember it for the UI too
+        except Exception:
+            pass
+        return [rid for rid in rids if self._run_active(rid)]
 
     def _pending_notes(self, s: AgentSession) -> list[dict]:
         return [n for n in s.notifications if not n.get("delivered")]
@@ -1321,6 +1535,9 @@ class AgentManager:
         while body and sum(len(x) for x in body) > BUDGET:
             body.pop(0)
         body_section = (["## What you did in the interrupted turn"] + body + [""]) if body else []
+        # the replayed transcript already contains anything a killed turn streamed,
+        # so the separate carry-over must not be spliced in a second time
+        s.interruptedTail = ""
         return "\n".join(header + body_section + ["## Now", wake_prompt])
 
     # ------------------------------------------------------------------ scheduling (Timeline)
@@ -1468,23 +1685,61 @@ class AgentManager:
 
     # ------------------------------------------------------------------ engine turn
     async def _run_turn(self, s: AgentSession, prompt: str, resume: bool, _retry: bool = False) -> None:
+        """Drive this session forward until it comes to rest.
+
+        ITERATIVE on purpose. A turn very often chains straight into another one
+        (a queued steer, a notification wake, a preempt, a fresh-thread retry) and
+        a long-lived session runs hundreds of them; recursing per turn would grow
+        the Python stack for the lifetime of the conversation.
+        """
+        retry_used = _retry
+        display = None
+        while True:
+            nxt = await self._one_turn(s, prompt, resume, retry_used, display)
+            if nxt is None:
+                return
+            prompt, display, resume, retry_used = nxt
+
+    async def _one_turn(self, s: AgentSession, prompt: str, resume: bool,
+                        retry_used: bool,
+                        display: str | None = None) -> tuple[str, str | None, bool, bool] | None:
+        """Run exactly ONE engine turn.
+
+        `prompt` is what the ENGINE receives; `display` (when given) is the shorter
+        thing the user sees in the transcript. They differ whenever we splice
+        recovery context into the prompt — a rebuilt history after a failed resume,
+        or the text a killed turn had streamed but the engine never recorded.
+
+        Returns the next (prompt, display, resume, retry_used) to chain into, or
+        None when the session has come to rest.
+        """
         s.status = "starting"
         s.error = None
         s.finishedAt = None
-        self._emit(s.id, {"kind": "system", "text": ("↪ " + prompt) if resume else prompt, "role": "user"})
+        shown = display if display is not None else prompt
+        self._emit(s.id, {"kind": "system", "text": ("↪ " + shown) if resume else shown, "role": "user"})
         self._save_sessions()
         try:
             browser_note = await self._ensure_browser(s)  # None, or a guidance note if browserless
         except _Stopped:
-            return  # stopped while queued; status is already "stopped"
+            return None  # stopped while queued; status is already "stopped"
         except Exception as e:
             s.status = "failed"; s.error = str(e); s.finishedAt = time.time()
             self._emit(s.id, {"kind": "error", "text": str(e)})
             self._save_sessions()
-            return
+            return None
         s.status = "running"
         if not s.startedAt:
             s.startedAt = time.time()
+        # Re-resolve model/effort against the catalogue every turn: the installed
+        # CLI can be upgraded (or a model retired) between turns of a long session,
+        # and passing a model the engine no longer knows would fail the whole turn.
+        model, effort = await engines.resolve_async(s.engine, s.model, s.effort)
+        if (model, effort) != (s.model, s.effort):
+            if s.model and model != s.model:
+                self._emit(s.id, {"kind": "system", "level": "warn",
+                                  "text": f"⚙ {s.engine} no longer offers “{s.model}” — using {model}"})
+            s.model, s.effort = model, effort
         self._save_sessions()
 
         backend_url = f"http://127.0.0.1:{os.environ.get('AUTOMATION_PORT', '8765')}"
@@ -1504,6 +1759,7 @@ class AgentManager:
             env_pairs["AUTOMATION_DATA_DIR"] = os.environ["AUTOMATION_DATA_DIR"]
         if s.controlPort:
             env_pairs["MCP_CONTROL_PORT"] = str(s.controlPort)
+        env_pairs = self._mcp_env_pairs(s, env_pairs)
 
         ws = SESSIONS_DIR / s.id / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
@@ -1515,16 +1771,18 @@ class AgentManager:
             s.threadStartedTurn = s.turns
             resume = False
             self._save_sessions()
+        else:
+            prompt = self._with_interrupted_tail(s, prompt)
         resume_attempted = resume and bool(s.threadId)  # did we use the engine's resume path?
         try:
             if s.engine == "codex":
-                cmd = self._codex_cmd(s, prompt, sysprompt, env_pairs, str(ws), resume)
+                cmd, stdin_text = self._codex_cmd(s, prompt, sysprompt, env_pairs, str(ws), resume)
             else:
-                cmd = self._claude_cmd(s, prompt, sysprompt, env_pairs, resume)
+                cmd, stdin_text = self._claude_cmd(s, prompt, sysprompt, env_pairs, resume)
         except Exception as e:
             self._emit(s.id, {"kind": "error", "text": f"failed to build command: {e}"})
             s.status = "failed"; s.error = str(e); s.finishedAt = time.time(); self._save_sessions()
-            return
+            return None
 
         normalize = _norm_codex if s.engine == "codex" else _norm_claude
         # Let big MCP tool results through to the model intact — notably an inline
@@ -1532,30 +1790,61 @@ class AgentManager:
         # large observe/extract snapshots. Claude Code caps MCP output at
         # MAX_MCP_OUTPUT_TOKENS (default 25k) and would TRUNCATE them, corrupting the
         # image; raise it (the file-path + Read fallback still covers any overflow).
-        turn_env = {**os.environ}
+        # engine_env() also re-adds the JS toolchain to PATH: both CLIs are
+        # `#!/usr/bin/env node` shims, and a packaged desktop app is launched
+        # WITHOUT the login shell's PATH — without this they fail to even start.
+        turn_env = engines.engine_env()
         turn_env.setdefault("MAX_MCP_OUTPUT_TOKENS", "200000")
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                *cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE, cwd=str(ws), limit=16 * 1024 * 1024,
                 start_new_session=(os.name == "posix"),
                 env=turn_env)
         except Exception as e:
             self._emit(s.id, {"kind": "error", "text": f"could not start {s.engine}: {e}"})
             s.status = "failed"; s.error = str(e); s.finishedAt = time.time(); self._save_sessions()
-            return
+            return None
         self.procs[s.id] = proc
+        # Feed the prompt in as a task, not inline: a big prompt can exceed the pipe
+        # buffer, and the engine only drains stdin once it is up — blocking here
+        # before we start reading stdout would deadlock the turn.
+        feed = asyncio.create_task(self._feed_stdin(proc, stdin_text))
         # reset transient preempt bookkeeping at turn start (a previous turn may have
         # left non-zero in-flight counts after a kill; new turn starts from scratch)
         self._tool_in_flight[s.id] = 0
-        self._pending_call[s.id] = []
-        # per-turn streaming state: accumulate text chunks per block index (Claude only
-        # — Codex doesn't stream agent_message). The turn_id makes the message id
-        # unique across turns (so the UI never accidentally collapses two turns' final
-        # messages into one because of an index reuse).
+        self._pending_call[s.id] = {}
+        # Per-turn streaming state. Claude streams text and thinking token by token;
+        # we accumulate per (assistant message, block index) so two assistant
+        # messages in the SAME turn — the norm as soon as a tool is used, each
+        # restarting its block indices at 0 — never collide on one id and overwrite
+        # each other in the transcript.
         turn_id = uuid.uuid4().hex[:8]
-        text_acc: dict[int, str] = {}
+        acc: dict[str, str] = {}          # event id -> text accumulated so far
+        open_ids: list[str] = []          # partials still awaiting their canonical block
+        cur_msg = turn_id                 # id of the assistant message being streamed
+        msg_seq = 0
+        # Block indices announced by content_block_start, in arrival order, as
+        # (stream index, block type). Claude Code emits ONE assistant event per
+        # completed block containing only that block, so the block's position in
+        # that event is always 0 and cannot be trusted; consuming this queue by
+        # type is what lets the finished block reclaim the id its own partials
+        # were streamed under (otherwise the streamed text is orphaned and gets
+        # re-emitted as a duplicate at end of turn).
+        pending_blocks: list[tuple[int, str]] = []
         turn_flags: dict = {}
+        BLOCK_KIND = {"text": "message", "thinking": "reasoning"}
+
+        def ev_id(kind: str, msg: str, idx: int) -> str:
+            return f"{'m' if kind == 'message' else 'r'}{turn_id}-{msg}-{idx}"
+
+        def claim_idx(kind: str, fallback: int) -> int:
+            for i, (bidx, btype) in enumerate(pending_blocks):
+                if BLOCK_KIND.get(btype) == kind:
+                    pending_blocks.pop(i)
+                    return bidx
+            return fallback
+
         drain = asyncio.create_task(self._drain_stderr(s.id, proc.stderr, turn_flags))
         while True:
             try:
@@ -1572,44 +1861,68 @@ class AgentManager:
             except json.JSONDecodeError:
                 continue
             for ev in normalize(obj):
-                # ----- live text streaming (Claude only). _text_delta is an internal
-                # marker from the normalizer; we accumulate per block_idx and emit an
-                # id-stable PARTIAL `message` event so the UI sees the text grow chunk
-                # by chunk. Not persisted (the final message replaces it).
-                if ev.get("kind") == "_text_delta":
-                    idx = int(ev.get("idx", 0))
-                    text_acc[idx] = text_acc.get(idx, "") + (ev.get("chunk") or "")
-                    self._emit(s.id, {"kind": "message",
-                                      "id": f"m{turn_id}-{idx}",
-                                      "text": text_acc[idx],
+                kind = ev.get("kind")
+                # ----- live streaming (Claude). The internal _* events never reach
+                # the transcript: they only drive an id-stable PARTIAL event the UI
+                # replaces in place, until the canonical block lands.
+                if kind == "_msg_start":
+                    msg_seq += 1
+                    cur_msg = ev.get("msgId") or f"{turn_id}#{msg_seq}"
+                    pending_blocks.clear()
+                    continue
+                if kind == "_block_start":
+                    pending_blocks.append((int(ev.get("idx", 0)), ev.get("blockType") or ""))
+                    continue
+                if kind in ("_text_delta", "_reasoning_delta"):
+                    out_kind = "message" if kind == "_text_delta" else "reasoning"
+                    eid = ev_id(out_kind, cur_msg, int(ev.get("idx", 0)))
+                    acc[eid] = acc.get(eid, "") + (ev.get("chunk") or "")
+                    if eid not in open_ids:
+                        open_ids.append(eid)
+                    self._emit(s.id, {"kind": out_kind, "id": eid, "text": acc[eid],
                                       "partial": True})
                     continue
-                # The canonical (full-text) `message` from the assistant event carries
-                # `_block_idx`; tag it with the SAME id as the partials so the UI
-                # replaces the streaming text with the final/persisted version.
-                if ev.get("kind") == "message" and "_block_idx" in ev:
-                    idx = int(ev.pop("_block_idx"))
-                    ev["id"] = f"m{turn_id}-{idx}"
-                self._emit(s.id, ev)
-                kind = ev.get("kind")
-                # ----- preempt-safety bookkeeping + ack-suppression -----
+                # The canonical (full) block reclaims the id its partials streamed
+                # under, so the UI swaps the streaming text for the final, persisted
+                # one instead of showing it twice.
+                if "_block_idx" in ev:
+                    fallback = int(ev.pop("_block_idx"))
+                    mid = ev.pop("_msg_id", "") or cur_msg
+                    eid = ev_id(kind, mid, claim_idx(kind, fallback))
+                    ev["id"] = eid
+                    if eid in open_ids:
+                        open_ids.remove(eid)
+                    acc.pop(eid, None)
+                # ----- pair tool calls with their results BEFORE emitting, so the
+                # event that reaches the UI already carries the right tool name -----
+                tname = targs = None
                 if kind == "tool_call":
                     self._tool_in_flight[s.id] = self._tool_in_flight.get(s.id, 0) + 1
-                    self._pending_call.setdefault(s.id, []).append(
-                        (ev.get("tool"), ev.get("args") or {}))
+                    key = ev.get("callId") or f"_{self._tool_in_flight[s.id]}"
+                    self._pending_call.setdefault(s.id, {})[key] = (ev.get("tool"), ev.get("args") or {})
                 elif kind == "tool_result":
                     self._tool_in_flight[s.id] = max(0, self._tool_in_flight.get(s.id, 0) - 1)
-                    calls = self._pending_call.get(s.id) or []
-                    if calls:
-                        tname, targs = calls.pop(0)
-                        self._ack_from_tool_result(s, tname, targs, ev.get("result") or "")
+                    calls = self._pending_call.get(s.id) or {}
+                    key = ev.get("callId")
+                    # Claude's tool_result carries no tool name — recover it from the
+                    # call it echoes, so both the ack logic and the UI label are right
+                    # even when several tools run in parallel.
+                    if key in calls:
+                        tname, targs = calls.pop(key)
+                    elif calls:
+                        tname, targs = calls.pop(next(iter(calls)))
+                    if tname and not ev.get("tool"):
+                        ev["tool"] = tname
+                self._emit(s.id, ev)
+                if kind == "tool_result":
+                    self._ack_from_tool_result(s, tname, targs or {}, ev.get("result") or "")
                 elif kind == "error":
                     # a top-level error event (codex turn.failed / claude result error)
                     # means the agentic loop itself broke — distinct from a tool error.
                     turn_flags["turn_error"] = True
                     turn_flags["turn_error_msg"] = ev.get("text")
                 # track runs the agent started (tool_result of studio_run_workflow carries runId)
-                if kind == "tool_result" and ev.get("tool") in ("studio_run_workflow", ""):
+                if kind == "tool_result" and ev.get("tool") in ("studio_run_workflow", "", None):
                     rid = _extract_run_id(ev.get("result"))
                     if rid and rid not in s.runIds:
                         s.runIds.append(rid)
@@ -1620,12 +1933,32 @@ class AgentManager:
                 if self._pending_notes(s) and self._tool_in_flight.get(s.id, 0) == 0:
                     self._preempt_now(s)  # kill_tree → next readline returns empty
         code = await proc.wait()
-        try:
-            await asyncio.wait_for(drain, timeout=2)
-        except Exception:
-            pass
+        for t in (drain, feed):
+            try:
+                await asyncio.wait_for(t, timeout=2)
+            except Exception:
+                pass
         self.procs.pop(s.id, None)
         s.turns += 1
+        # The engine was cut off (stop, preempt, crash) while streaming a block: the
+        # canonical event never arrived, so the text exists ONLY as unpersisted
+        # partials. Commit what we have — under the same id, so the UI keeps the
+        # text it is already showing — rather than losing it from the transcript.
+        cut: list[str] = []
+        for eid in open_ids:
+            text = (acc.get(eid) or "").strip()
+            if not text:
+                continue
+            self._emit(s.id, {"kind": "message" if eid.startswith("m") else "reasoning",
+                              "id": eid, "text": text, "truncated": True})
+            if eid.startswith("m"):     # only committed prose is worth replaying
+                cut.append(text)
+        # The engine was killed before it could record this in its own session, so
+        # OUR transcript is the only copy — carry it into the next turn's prompt.
+        s.interruptedTail = ("\n\n".join(cut))[-4000:] if cut else ""
+        waiter = self._turn_flushed.get(s.id)
+        if waiter:
+            waiter.set()
         # Preempted by an incoming notification → chain into a fresh turn with the
         # wake prompt. The wake is computed HERE (not at preempt time) so any
         # additional notifications that landed after arming get coalesced in. Resume
@@ -1639,39 +1972,33 @@ class AgentManager:
             self._save_sessions()
             wake = self._wake_prompt(notes) if notes else "Resuming after a preempt."
             if s.threadId:
-                await self._run_turn(s, wake, resume=True)
-            else:
-                full = self._reconstruct_fresh_prompt(s, s.prompt or prompt, wake)
-                await self._run_turn(s, full, resume=False)
-            return
+                return (wake, None, True, retry_used)
+            return (self._reconstruct_fresh_prompt(s, s.prompt or prompt, wake), wake, False, retry_used)
         # Resume failed or the native engine thread is internally inconsistent
         # (e.g. Codex "orphan function call output" followed by an API schema
         # rejection) → fall back to a fresh native thread so the user message
         # still runs. CRITICAL: preserve prior I/O via reconstruction, so a
         # restart doesn't lose what the agent already did.
         if (code != 0 and resume_attempted and _resume_recoverable_failure(turn_flags)
-                and not _retry and s.status != "stopped"):
+                and not retry_used and s.status != "stopped"):
             self._emit(s.id, {"kind": "system",
                               "text": "↻ native engine resume failed — starting a fresh thread with the prior context preserved"})
             s.threadId = None
             s.threadStartedTurn = s.turns
-            full = self._reconstruct_fresh_prompt(s, s.prompt or "", prompt)
-            await self._run_turn(s, full, resume=False, _retry=True)
-            return
+            return (self._reconstruct_fresh_prompt(s, s.prompt or "", prompt), prompt, False, True)
         if s.status == "stopped":
             await self._release_browser(s)
             self._save_sessions()
             # if a notification was queued while we were running, it can now wake the
             # stopped (at-rest) session — exactly the same as done/failed
             self._maybe_deliver(s)
-            return
+            return None
         # A message queued during this turn → continue immediately, KEEPING the
         # browser (no restart between back-to-back turns).
         if s.pendingSteers:
             nxt = s.pendingSteers.pop(0)
             self._save_sessions()
-            await self._run_turn(s, nxt, resume=True)
-            return
+            return (nxt, None, True, retry_used)
         # A notification arrived during this turn but we never hit a safe boundary
         # (e.g. it arrived while a tool was in flight and the engine finished cleanly
         # right after). Consume it now as a fresh turn KEEPING the browser — the
@@ -1682,8 +2009,7 @@ class AgentManager:
             for n in notes:
                 n["delivered"] = True
             self._save_sessions()
-            await self._run_turn(s, self._wake_prompt(notes), resume=True)
-            return
+            return (self._wake_prompt(notes), None, True, retry_used)
         # Decide the resting status. Engine crash (non-zero exit / top-level turn
         # error) → FAILURE. Otherwise: if a workflow this agent launched is still
         # running, it OWNS the profile lock and must keep its browser (the run is
@@ -1714,6 +2040,39 @@ class AgentManager:
         s.finishedAt = time.time()
         self._emit(s.id, {"kind": "status", "status": s.status})
         self._save_sessions()
+        return None
+
+    def _with_interrupted_tail(self, s: AgentSession, prompt: str) -> str:
+        """Prepend what the previous, killed turn had already written but the engine
+        never persisted. Consumed once — the next turn's own resume carries it."""
+        tail = (s.interruptedTail or "").strip()
+        if not tail:
+            return prompt
+        s.interruptedTail = ""
+        self._save_sessions()
+        return ("[Your previous turn was interrupted before your engine could record it, so it is "
+                "missing from your own session history. This is what you had already written — "
+                "continue from here, do NOT start over:]\n"
+                f"{tail}\n\n---\n{prompt}")
+
+    @staticmethod
+    async def _feed_stdin(proc, text: str) -> None:
+        """Write the turn's prompt to the engine and close stdin so it stops
+        waiting for more. Best-effort: a turn killed mid-write (a stop, a preempt)
+        makes these raise, and that is not an error worth surfacing."""
+        try:
+            if proc.stdin is None:
+                return
+            proc.stdin.write((text or "").encode())
+            await proc.stdin.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except Exception:
+                pass
 
     async def _drain_stderr(self, sid: str, stream, flags: dict | None = None) -> None:
         if not stream:
@@ -1745,39 +2104,74 @@ class AgentManager:
                 self._emit(sid, {"kind": "system", "text": f"[{self.sessions[sid].engine}] {line[:200]}"})
 
     # ------------------------------------------------------------------ command builders
+    def _mcp_env_pairs(self, s: AgentSession, base_env: dict) -> dict:
+        """Environment the MCP tool server child is started with.
+
+        PYTHONPATH is load-bearing, not belt-and-braces: in a dev checkout the MCP
+        server is `python -m orchestrator`, and Claude Code does NOT honour a `cwd`
+        in an MCP server entry (Codex does), so without it the server dies with
+        "No module named orchestrator" and the agent silently loses every Studio
+        tool. Pointing PYTHONPATH at the backend package dir makes the module
+        importable regardless of which engine — or which working directory —
+        starts it. Harmless in a frozen build, where the server is the exe itself.
+        """
+        env = dict(base_env)
+        if not getattr(sys, "frozen", False):
+            prev = os.environ.get("PYTHONPATH") or ""
+            env["PYTHONPATH"] = (BACKEND_DIR + os.pathsep + prev) if prev else BACKEND_DIR
+        return env
+
     def _mcp_env_toml(self, env_pairs: dict) -> str:
-        inner = ",".join(f'{k}="{v}"' for k, v in env_pairs.items())
+        inner = ",".join(f"{k}={json.dumps(str(v))}" for k, v in env_pairs.items())
         return "mcp_servers.studio.env={" + inner + "}"
 
-    def _codex_cmd(self, s, prompt, sysprompt, env_pairs, ws, resume) -> list[str]:
+    def _codex_cmd(self, s, prompt, sysprompt, env_pairs, ws, resume) -> tuple[list[str], str]:
+        """(argv, stdin) for one Codex turn.
+
+        The prompt goes over STDIN (`-`), never as an argument. Our prompts are
+        big — a role prompt is up to ~25 KB and a rebuilt history adds ~12 KB more
+        — and Windows caps an entire command line at 32 767 characters, so passing
+        them as argv is a "works on macOS, fails on Windows" trap. stdin also
+        sidesteps every quoting and embedded-newline hazard.
+        """
         binary = _find_binary("codex")
         base = _self_base()
         mcp_cmd, mcp_args = base[0], base[1:] + ["mcp"]
         full_prompt = (f"{sysprompt}\n\n---\nTask: {prompt}" if sysprompt and not resume else prompt)
         cmd = [binary, "exec", "--json", "--skip-git-repo-check",
                "--dangerously-bypass-approvals-and-sandbox", "-C", ws,
-               "-m", CODEX_MODEL,
-               "-c", f'model_reasoning_effort="{CODEX_EFFORT}"',
-               "-c", f'mcp_servers.studio.command="{mcp_cmd}"',
+               "-c", f"mcp_servers.studio.command={json.dumps(mcp_cmd)}",
                "-c", "mcp_servers.studio.args=[" + ",".join(json.dumps(a) for a in mcp_args) + "]",
-               "-c", f'mcp_servers.studio.cwd="{BACKEND_DIR}"',
+               "-c", f"mcp_servers.studio.cwd={json.dumps(BACKEND_DIR)}",
                "-c", self._mcp_env_toml(env_pairs)]
+        if s.model:
+            cmd += ["-m", s.model]
+        if s.effort:
+            cmd += ["-c", f"model_reasoning_effort={json.dumps(s.effort)}"]
         if resume and s.threadId:
-            cmd += ["resume", s.threadId, full_prompt]
+            cmd += ["resume", s.threadId, "-"]
         else:
-            cmd += [full_prompt]
-        return cmd
+            cmd += ["-"]
+        return cmd, full_prompt
 
-    def _claude_cmd(self, s, prompt, sysprompt, env_pairs, resume) -> list[str]:
+    def _claude_cmd(self, s, prompt, sysprompt, env_pairs, resume) -> tuple[list[str], str]:
+        """(argv, stdin) for one Claude Code turn.
+
+        Same reasoning as Codex: the user prompt is piped in rather than passed as
+        an argument. The system prompt has to go through `--append-system-prompt`
+        (the file variant is not honoured in print mode), so on Windows — the only
+        platform with a hard command-line ceiling — we fall back to folding it into
+        the piped prompt whenever the two together would get close to the limit.
+        """
         binary = _find_binary("claude")
         base = _self_base()
         cfg = {"mcpServers": {"studio": {"command": base[0], "args": base[1:] + ["mcp"],
                                          "cwd": BACKEND_DIR, "env": env_pairs}}}
         cfg_path = SESSIONS_DIR / s.id / "mcp.json"
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(json.dumps(cfg))
-        cmd = [binary, "-p", prompt, "--output-format", "stream-json", "--verbose",
-               "--include-partial-messages",   # real per-token streaming of text blocks
-               "--model", CLAUDE_MODEL, "--effort", CLAUDE_EFFORT,
+        cmd = [binary, "-p", "--output-format", "stream-json", "--verbose",
+               "--include-partial-messages",   # real per-token streaming of text + thinking
                "--mcp-config", str(cfg_path),
                # Allow Claude's built-in file tools alongside our MCP server, so
                # the agent can `Read` / `Write` / `Edit` the paths Studio gives
@@ -1787,11 +2181,20 @@ class AgentManager:
                # ffprobing / inspecting a downloaded file.
                "--allowedTools", "Read,Write,Edit,Bash,mcp__studio",
                "--permission-mode", "bypassPermissions"]
+        if s.model:
+            cmd += ["--model", s.model]
+        if s.effort:
+            cmd += ["--effort", s.effort]
+        stdin_text = prompt
         if sysprompt:
-            cmd += ["--append-system-prompt", sysprompt]
+            fits = (not IS_WIN) or (sum(len(a) + 3 for a in cmd) + len(sysprompt) < WIN_CMDLINE_BUDGET)
+            if fits:
+                cmd += ["--append-system-prompt", sysprompt]
+            else:
+                stdin_text = f"{sysprompt}\n\n---\nTask: {prompt}"
         if resume and s.threadId:
             cmd += ["--resume", s.threadId]
-        return cmd
+        return cmd, stdin_text
 
 
 def engine_status() -> dict:

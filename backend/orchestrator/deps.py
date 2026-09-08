@@ -27,8 +27,12 @@ def _ok(p: str | Path | None) -> bool:
         return False
 
 
-def _node_tool_dirs() -> list[Path]:
-    """Standard per-user JS-toolchain bin dirs where npm/brew/etc. drop codex/claude."""
+def engine_search_dirs() -> list[Path]:
+    """Standard per-user JS-toolchain bin dirs where npm/brew/etc. drop codex/claude
+    — and where `node` itself lives. Also grafted onto the PATH of every engine
+    subprocess (see orchestrator.engines.engine_env), because a Finder- or
+    Explorer-launched desktop app inherits a bare PATH and the CLIs are
+    `#!/usr/bin/env node` shims that would otherwise fail to start."""
     home = Path.home()
     dirs: list[Path] = []
     try:
@@ -74,7 +78,7 @@ def find_engine(engine: str) -> str | None:
         f = shutil.which(engine)  # honours PATHEXT on Windows
         if _ok(f):
             return f
-        for d in _node_tool_dirs():
+        for d in engine_search_dirs():
             for nm in _names(engine):
                 p = d / nm
                 if _ok(p):

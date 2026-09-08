@@ -96,6 +96,10 @@ class LocalSession:
                     timeout_ms: int = 30_000) -> dict:
         return await self.hb.fetch(url, headers=headers, timeout_ms=timeout_ms)
 
+    async def resolve_url(self, url: str, *, max_hops: int = 5,
+                          timeout_ms: int = 15_000) -> dict:
+        return await self.hb.resolve_url(url, max_hops=max_hops, timeout_ms=timeout_ms)
+
 
 class RemoteSession:
     """Attaches to a running control server (humanbrowser.server)."""
@@ -208,6 +212,12 @@ class RemoteSession:
                     timeout_ms: int = 30_000) -> dict:
         return (await self._post("/act", {"action": "fetch", "url": url,
                                           "headers": headers or {},
+                                          "timeout_ms": int(timeout_ms)})).get("result") or {}
+
+    async def resolve_url(self, url: str, *, max_hops: int = 5,
+                          timeout_ms: int = 15_000) -> dict:
+        return (await self._post("/act", {"action": "resolve_url", "url": url,
+                                          "max_hops": int(max_hops),
                                           "timeout_ms": int(timeout_ms)})).get("result") or {}
 
 

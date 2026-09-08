@@ -156,7 +156,9 @@ export type AgentStatus =
   | "starting" | "queued" | "running"
   | "waiting"    // turn ended with a workflow it launched still running — paused, woken on completion
   | "scheduled"  // ended a turn after scheduling a future wake (re-queues at scheduledAt)
-  | "done" | "failed" | "canceled";
+  | "done" | "failed"
+  | "stopped"    // user-stopped; at rest and continuable, like done/failed
+  | "canceled";  // legacy name for "stopped", still present in old persisted sessions
 
 // An agent is engine-agnostic — the engine (codex|claude) is chosen per session at launch.
 export interface AgentDef {
@@ -181,6 +183,10 @@ export interface AgentSession {
   prompt: string;
   status: AgentStatus;
   watch: boolean;
+  /** Engine model + reasoning effort for the NEXT turn — ids the installed CLI
+   *  advertises (see /api/agents/models), changeable mid-conversation. */
+  model?: string;
+  effort?: string;
   createdAt: number;
   startedAt?: number;
   finishedAt?: number;
@@ -206,6 +212,9 @@ export interface AgentNotification {
 export interface AgentEvent {
   t: number;
   kind: "message" | "reasoning" | "tool_call" | "tool_result" | "status" | "usage" | "system" | "error";
+  /** Stable across a streamed block's partials and its final version — the UI
+   *  replaces in place rather than stacking half-typed copies. */
+  id?: string;
   text?: string;
   tool?: string;
   args?: unknown;
@@ -215,6 +224,42 @@ export interface AgentEvent {
   usage?: Record<string, unknown>;
   role?: string;
   server?: string;
+  /** live streaming chunk — superseded by the final event with the same id */
+  partial?: boolean;
+  /** the engine was cut off (stop / preempt) while writing this block */
+  truncated?: boolean;
+  /** severity for a `system` note: plain when absent */
+  level?: "info" | "warn";
+  /** this system note reports the engine compacting its own context */
+  compact?: boolean;
+}
+
+// ---- Engine model catalogue (fetched FROM the installed CLIs, never hardcoded)
+export interface EngineEffort {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface EngineModel {
+  id: string;
+  label: string;
+  description?: string;
+  efforts: string[];
+  effortLabels?: Record<string, string>;
+  defaultEffort?: string;
+  isDefault?: boolean;
+}
+
+export interface EngineCatalog {
+  engine: AgentEngine;
+  models: EngineModel[];
+  defaultModel: string;
+  /** where the list came from: the CLI itself, its own cache, or our fallback seed */
+  source: "app-server" | "cache" | "cli" | "seed";
+  error?: string | null;
+  fetchedAt?: number;
+  current?: string;
 }
 
 export interface InstallInfo {

@@ -20,7 +20,8 @@ import json
 import random
 import sys
 from dataclasses import asdict, dataclass
-from urllib.parse import quote_plus
+import re
+from urllib.parse import quote_plus, urlsplit
 
 from humanbrowser.session import open_session
 from . import _events as ev
@@ -32,24 +33,58 @@ _COUNT_JS = "() => document.querySelectorAll('#search a h3, #rso a h3').length"
 _EXTRACT_JS = r"""(maxResults) => {
   const root = document.querySelector('#search') || document.querySelector('#rso') || document.body;
   const seen = new Set(); const results = [];
+  const isGoogle = (h) => /(^|\.)google\.[a-z.]+$/i.test(h);
+  // Google no longer puts the destination in the href: an organic result points at
+  // Google's own /goto?url=<opaque token> tracker (the `ping` attribute is opaque
+  // too). We therefore report the tracker as `redirect` and let the caller resolve
+  // it. The visible <cite> is only a HINT — it is a breadcrumb, so it can be
+  // elided ("…") or show labels rather than real path segments — so it is used for
+  // the host, and as a URL only when the redirect cannot be resolved.
+  const fromCite = (c) => {
+    if (!c) return null;
+    const cite = c.querySelector('cite'); if (!cite) return null;
+    let t = (cite.innerText || '').trim().split('\n')[0].trim(); if (!t) return null;
+    const elided = /[…]|\.\.\./.test(t);
+    t = t.replace(/\s*[›>]\s*/g, '/').replace(/[…]|\.\.\./g, '').replace(/\/+$/, '');
+    if (!/^https?:\/\//i.test(t)) t = 'https://' + t;
+    try {
+      const u = new URL(t);
+      // a breadcrumb like "r/codex · 185,2k+ followers" parses as a URL but is not
+      // a hostname — require a real dotted domain before trusting it
+      if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(u.hostname)) return null;
+      if (isGoogle(u.hostname)) return null;
+      return { url: u.href, host: u.hostname, elided };
+    } catch (e) { return null; }
+  };
   for (const h3 of root.querySelectorAll('a h3')) {
     if (results.length >= maxResults) break;
     const a = h3.closest('a'); if (!a) continue;
-    const href = a.href; if (!href || !/^https?:/i.test(href)) continue;
-    let host = '';
-    try { const u = new URL(href); host = u.hostname;
-      if (/(^|\.)google\.[a-z.]+$/i.test(u.hostname)) continue;
-    } catch (e) { continue; }
-    if (seen.has(href)) continue;
     const title = (h3.innerText || '').trim(); if (!title) continue;
-    let snippet = '';
     const c = h3.closest('div.g') || h3.closest('[data-hveid]') || a.parentElement;
+    const href = a.href || '';
+    const cited = fromCite(c);
+    let direct = null;
+    if (/^https?:/i.test(href)) {
+      try { const u = new URL(href); if (!isGoogle(u.hostname)) direct = u; } catch (e) {}
+    }
+    let url = '', host = '', redirect = '';
+    if (direct) {                        // classic markup: the href IS the target
+      url = direct.href; host = direct.hostname;
+    } else if (/^https?:/i.test(href)) { // tracker href → resolve it later
+      redirect = href;
+      if (cited) { url = cited.url; host = cited.host; }
+    } else if (cited) {
+      url = cited.url; host = cited.host;
+    } else { continue; }
+    const key = url || redirect;
+    if (!key || seen.has(key)) continue;
+    let snippet = '';
     if (c) {
       const sn = c.querySelector('div[data-sncf], .VwiC3b');
       snippet = sn ? sn.innerText.trim() : (c.innerText || '').replace(title, ' ').replace(/\s+/g, ' ').trim().slice(0, 320);
     }
-    seen.add(href);
-    results.push({ rank: results.length + 1, title, url: href, host, snippet: snippet.slice(0, 400) });
+    seen.add(key);
+    results.push({ title, url, host, snippet: snippet.slice(0, 400), redirect });
   }
   return results;
 }"""
@@ -107,6 +142,44 @@ async def _wait_results_settled(session, timeout: float = 20.0) -> int:
     return last
 
 
+_DOMAIN_RE = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$", re.I)
+_GOOGLE_HOST_RE = re.compile(r"(^|\.)google\.[a-z.]+$", re.I)
+
+
+async def _resolve_tracked(session, raw: list[dict], budget: int) -> None:
+    """Replace Google's tracking redirect with the page it actually points at.
+
+    Google serves organic results as `/goto?url=<opaque>`, so the DOM no longer
+    contains the destination. The visible <cite> is a *breadcrumb*: often the real
+    path, but sometimes elided or made of labels, so trusting it alone yields
+    confident-looking wrong URLs. Following the redirect is authoritative and
+    costs one small request per result (headers only — no page download), so we
+    do that whenever a tracker link exists and keep the cite purely as a fallback.
+    """
+    if budget <= 0 or not hasattr(session, "resolve_url"):
+        return
+    for r in raw[:max(0, budget)]:
+        redirect = r.get("redirect")
+        if not redirect:
+            continue
+        final = ""
+        try:
+            final = ((await session.resolve_url(redirect)) or {}).get("url") or ""
+        except Exception:
+            final = ""
+        host = ""
+        if final.startswith("http"):
+            try:
+                host = urlsplit(final).hostname or ""
+            except ValueError:
+                host = ""
+        if host and _DOMAIN_RE.match(host) and not _GOOGLE_HOST_RE.search(host):
+            r["url"], r["host"] = final, host
+        elif not r.get("url"):
+            # unresolvable and no usable cite — the tracker link still navigates
+            r["url"] = redirect
+
+
 async def search(query: str, *, num_results: int = 10, headless: bool = True,
                  humanize: bool = True, profile: str | None = None,
                  server: str | None = None) -> list[SearchResult]:
@@ -137,13 +210,16 @@ async def search(query: str, *, num_results: int = 10, headless: bool = True,
                 if not await _wait_results_settled(session):
                     break  # no results on this page → end of results
             raw = await session.evaluate(_EXTRACT_JS, 50)  # all organic results on this page
+            await _resolve_tracked(session, raw, num_results - len(results))
             new = 0
             for r in raw:
-                if r["url"] in seen:
+                url = r.get("url") or ""
+                if not url or url in seen:
                     continue
-                seen.add(r["url"])
-                r["rank"] = len(results) + 1
-                results.append(SearchResult(**r))
+                seen.add(url)
+                results.append(SearchResult(rank=len(results) + 1, title=r.get("title", ""),
+                                            url=url, host=r.get("host", ""),
+                                            snippet=r.get("snippet", "")))
                 new += 1
                 if len(results) >= num_results:
                     break

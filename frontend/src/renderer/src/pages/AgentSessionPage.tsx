@@ -8,6 +8,7 @@ import "katex/dist/katex.min.css";
 import { Header } from "@/components/Header";
 import { Icon } from "@/components/Icon";
 import { FileAttachPopover } from "@/components/FilePickerInput";
+import { ModelPicker } from "@/components/ModelPicker";
 import { jget, jpost, duration, timeAgo, untilTime, BACKEND_URL } from "@/lib/client";
 import type { AgentEvent, AgentSession } from "@/lib/types";
 
@@ -73,6 +74,7 @@ export default function AgentSessionPage() {
   const [steer, setSteer] = useState("");
   const [steerFilesJson, setSteerFilesJson] = useState("");
   const [busy, setBusy] = useState(false);
+  const [modelErr, setModelErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);   // follow the agent (auto-scroll) while pinned to bottom
   const [showJump, setShowJump] = useState(false);
@@ -127,9 +129,13 @@ export default function AgentSessionPage() {
             }
             return [...arr, ev];
           });
-          // status events: keep `s` in sync so the bar/labels update live
-          if (ev.kind === "status" && (ev as { status?: string }).status) {
-            setS((curr) => (curr ? { ...curr, status: (ev as { status?: string }).status as string } : curr));
+          // status events: keep `s` in sync so the bar/labels update live. Only
+          // the resting/lifecycle statuses map onto the session — transient ones
+          // the engine emits mid-turn ("thinking", "plan", "compacting") describe
+          // what it's doing, not what the session IS, and must not overwrite it.
+          const st = (ev as { status?: string }).status;
+          if (ev.kind === "status" && st && (IN_FLIGHT.includes(st) || AT_REST.includes(st))) {
+            setS((curr) => (curr ? { ...curr, status: st as AgentSession["status"] } : curr));
           }
         } catch {}
       };
@@ -200,6 +206,23 @@ export default function AgentSessionPage() {
     try { await jpost(`/api/agents/sessions/${id}/stop`); await refreshMeta(); }
     finally { setBusy(false); }
   };
+  // Change model / reasoning effort mid-conversation — the native thread is kept
+  // and the new setting applies from the next turn, exactly like /model in Codex
+  // or Claude Code. Optimistic: the pill updates at once, and refreshMeta (or the
+  // failure path) reconciles with what the backend actually accepted.
+  const setModel = useCallback(async (model: string, effort: string) => {
+    if (!s || (model === (s.model ?? "") && effort === (s.effort ?? ""))) return;
+    setS((c) => (c ? { ...c, model, effort } : c));
+    setModelErr("");
+    try {
+      await jpost(`/api/agents/sessions/${id}/model`, { model, effort });
+    } catch (e) {
+      setModelErr(String((e as Error).message));
+    } finally {
+      await refreshMeta();
+    }
+  }, [id, refreshMeta, s]);
+
   const controlBrowser = async (action: "show" | "hide") => {
     setBusy(true);
     try {
@@ -245,6 +268,8 @@ export default function AgentSessionPage() {
             <span className="w-1.5 h-1.5 rounded-full" style={{ background: c, animation: inFlight ? "pulse 1.2s infinite" : undefined }} /> {s.status}
           </span>
           <span className="text-[11.5px] text-faint">{s.engine}</span>
+          <ModelPicker compact syncDefaults={false} engine={s.engine} model={s.model ?? ""} effort={s.effort ?? ""}
+                       onChange={setModel} />
           <span className="inline-flex items-center gap-1 text-[11.5px] px-2 py-0.5 rounded-md" style={{ background: "#161616" }}><Icon name="user" size={12} /> {s.profileName}</span>
           {s.controlPort && (
             <span className="inline-flex items-center gap-1 text-[11.5px] px-2 py-0.5 rounded-md" style={{ background: "#161616" }}>
@@ -264,6 +289,12 @@ export default function AgentSessionPage() {
             {` · ${inFlight ? duration(s.startedAt) : timeAgo(s.createdAt)}`}
           </span>
         </div>
+        {modelErr && (
+          <div className="max-w-[1000px] mt-2 text-[12px] rounded-lg px-3 py-1.5"
+               style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>
+            Couldn’t change the model: {modelErr}
+          </div>
+        )}
         {s.status === "failed" && s.error && (
           <div className="max-w-[1000px] mt-2 text-[12.5px] rounded-lg px-3 py-2" style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>
             <span className="font-medium">Agent failed:</span> {s.error}
@@ -400,6 +431,27 @@ function EventRow({ e, turnInfo }: { e: AgentEvent; turnInfo?: TurnInfo }) {
       </div>
     );
   }
+  // -- the engine compacted its own context: a real, explainable pause in a long
+  // session, not a failure — give it its own quiet card so it reads as progress
+  if (e.kind === "system" && (e as any).compact) {
+    return (
+      <div className="rounded-lg px-3 py-2 text-[12px] flex items-start gap-2"
+           style={{ background: "#9b8cff10", color: "#b9adff", border: "1px solid #322a55" }}>
+        <Icon name="layers" size={13} />
+        <span>{(e.text || "").replace(/^↻\s*/, "")}</span>
+      </div>
+    );
+  }
+  // -- a warning from the engine (usage limit, model fallback, resumed on another model)
+  if (e.kind === "system" && (e as any).level === "warn") {
+    return (
+      <div className="rounded-lg px-3 py-2 text-[12px] flex items-start gap-2"
+           style={{ background: "#f5a62312", color: "#f5c06a", border: "1px solid #4a3a1a" }}>
+        <Icon name="alert" size={13} />
+        <span>{(e.text || "").replace(/^⚠\s*/, "")}</span>
+      </div>
+    );
+  }
   // -- preempting / paused / various meta system notes
   if (e.kind === "system") return (
     <div className="text-[11px] text-faint flex items-center gap-1.5"><Icon name="dot" size={10} /> {e.text}</div>
@@ -407,11 +459,21 @@ function EventRow({ e, turnInfo }: { e: AgentEvent; turnInfo?: TurnInfo }) {
   // -- agent message — markdown + KaTeX + copy button; if end-of-turn, also show elapsed
   if (e.kind === "message") {
     const raw = (e as any).text as string || "";
+    const partial = (e as any).partial === true;
+    const cut = (e as any).truncated === true;
     return (
       <div className="card p-3.5">
         <MessageMarkdown text={raw} />
+        {partial && <span className="inline-block w-1.5 h-3.5 align-text-bottom ml-0.5"
+                          style={{ background: "#3b9eff", animation: "pulse 1s infinite" }} />}
         <div className="mt-1.5 pt-1.5 flex items-center gap-3 text-[11px] text-faint" style={{ borderTop: "1px solid var(--color-line)" }}>
           <CopyButton text={raw} />
+          {cut && (
+            <span className="inline-flex items-center gap-1" style={{ color: "#f5c06a" }}
+                  title="The engine was interrupted here. This text is kept, and the agent is given it as context when it continues.">
+              <Icon name="alert" size={11} /> cut off — kept
+            </span>
+          )}
           {turnInfo?.endOfTurn && turnInfo.elapsedSec != null && (
             <span className="ml-auto inline-flex items-center gap-1"><Icon name="clock" size={11} /> turn took {fmtSec(turnInfo.elapsedSec)}</span>
           )}
@@ -419,7 +481,12 @@ function EventRow({ e, turnInfo }: { e: AgentEvent; turnInfo?: TurnInfo }) {
       </div>
     );
   }
-  if (e.kind === "reasoning") return <div className="text-[11.5px] text-faint italic px-1 whitespace-pre-wrap">{(e as any).text}</div>;
+  if (e.kind === "reasoning") return (
+    <div className="text-[11.5px] text-faint italic px-1 whitespace-pre-wrap">
+      {(e as any).text}
+      {(e as any).partial === true && <span className="not-italic"> …</span>}
+    </div>
+  );
   if (e.kind === "status") return <div className="text-[11px] text-faint flex items-center gap-1.5"><Icon name="clock" size={11} /> {(e as any).status}{(e as any).text ? ` — ${(e as any).text}` : ""}</div>;
   if (e.kind === "usage") return null;
   if (e.kind === "error") return <div className="text-[12.5px] rounded-lg px-3 py-2" style={{ background: "#ff5c5c12", color: "#ff8d8d", border: "1px solid #4a2424" }}>{(e as any).text}</div>;

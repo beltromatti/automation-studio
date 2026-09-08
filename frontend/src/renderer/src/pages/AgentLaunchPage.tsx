@@ -6,6 +6,7 @@ import { FilePickerInput } from "@/components/FilePickerInput";
 import { jget, jpost } from "@/lib/client";
 import { SessionRow } from "@/components/SessionRow";
 import { DependencyModal, useChromeGate } from "@/components/DependencyModal";
+import { ModelPicker } from "@/components/ModelPicker";
 import type { AgentDef, AgentEngine, AgentSession, EngineInfo, Profile } from "@/lib/types";
 
 export default function AgentLaunchPage() {
@@ -17,6 +18,9 @@ export default function AgentLaunchPage() {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [profileId, setProfileId] = useState("ephemeral");
   const [engine, setEngine] = useState<AgentEngine>("codex");
+  // "" = let the picker snap to whatever the installed CLI reports as its default
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
   const [prompt, setPrompt] = useState("");
   const [filesJson, setFilesJson] = useState("");  // JSON array of file ids attached to the launch prompt
   const [watch, setWatch] = useState(false);
@@ -31,6 +35,7 @@ export default function AgentLaunchPage() {
     jget<{ engines: Record<AgentEngine, EngineInfo> }>("/api/agents/engines").then((d) => {
       setEngines(d.engines);
       setEngine(d.engines.codex?.available ? "codex" : d.engines.claude?.available ? "claude" : "codex");
+      setModel(""); setEffort("");
     }).catch(() => {});
     jget<{ profiles: Profile[] }>("/api/profiles").then((d) => setProfiles(d.profiles)).catch(() => {});
     const load = () => jget<{ sessions: AgentSession[] }>("/api/agents/sessions").then((d) => setSessions(d.sessions.filter((s) => s.agentId === id))).catch(() => {});
@@ -56,7 +61,7 @@ export default function AgentLaunchPage() {
         try { const j = JSON.parse(filesJson); if (Array.isArray(j) && j.length) files = j.map(String); } catch {}
       }
       const { session } = await jpost<{ session: AgentSession }>("/api/agents/sessions",
-        { agentId: id, profileId, prompt, watch, engine,
+        { agentId: id, profileId, prompt, watch, engine, model, effort,
           inSeconds: scheduleMin > 0 ? scheduleMin * 60 : undefined,
           files });
       navigate(`/agents/sessions/${session.id}`);
@@ -102,13 +107,23 @@ export default function AgentLaunchPage() {
               <label className="label">Engine</label>
               <div className="relative flex items-center">
                 <span className="absolute left-3 pointer-events-none text-faint"><Icon name="sparkles" size={14} /></span>
-                <select className="input appearance-none" style={{ paddingLeft: 32 }} value={engine} onChange={(e) => setEngine(e.target.value as AgentEngine)}>
+                <select className="input appearance-none" style={{ paddingLeft: 32 }} value={engine} onChange={(e) => { setEngine(e.target.value as AgentEngine); setModel(""); setEffort(""); }}>
                   <option value="codex" disabled={!!(engines && !engines.codex.available)}>Codex{engines && !engines.codex.available ? " — not installed" : ""}</option>
                   <option value="claude" disabled={!!(engines && !engines.claude.available)}>Claude Code{engines && !engines.claude.available ? " — not installed" : ""}</option>
                 </select>
                 <Icon name="chevronRight" size={14} className="absolute right-3 rotate-90 pointer-events-none text-faint" />
               </div>
               <span className="text-[11px] text-faint">Chosen per session — the same agent can run on either engine.</span>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="label">Model &amp; reasoning effort</label>
+              <ModelPicker engine={engine} model={model} effort={effort}
+                           onChange={(m, e) => { setModel(m); setEffort(e); }} />
+              <span className="text-[11px] text-faint">
+                Read live from your installed {engine === "codex" ? "Codex" : "Claude Code"} — the same choices its own
+                picker offers. You can change both mid-conversation without losing the thread.
+              </span>
             </div>
 
             <div className="flex flex-col gap-1.5">

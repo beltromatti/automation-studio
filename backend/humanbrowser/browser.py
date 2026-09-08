@@ -426,6 +426,39 @@ class HumanBrowser:
         return {"ok": resp.ok, "status": resp.status, "url": resp.url, "path": str(dst),
                 "suggested_filename": name, "contentType": ctype}
 
+    async def resolve_url(self, url: str, *, max_hops: int = 5,
+                          timeout_ms: int = 15_000) -> dict:
+        """Follow a redirect chain WITHOUT downloading the destination.
+
+        Search engines increasingly hide result links behind their own tracking
+        redirect (Google serves `/goto?url=<opaque>`), so the href in the DOM is
+        no longer the real destination. Reading each hop's `location` header
+        resolves it for the cost of one tiny request per hop — as opposed to
+        `fetch`, which would pull the whole target page down to disk.
+        Cookies come from the page's own context, so session-locked redirects
+        resolve too. Never raises: an unresolvable url comes back unchanged.
+        """
+        if not self.context:
+            raise ActionError("browser not started")
+        from urllib.parse import urljoin
+        cur, hops = url, 0
+        status = 0
+        while hops < max_hops:
+            try:
+                resp = await self.context.request.get(cur, max_redirects=0, timeout=timeout_ms)
+            except Exception:
+                break
+            try:
+                status = resp.status
+                loc = (resp.headers or {}).get("location") or ""
+            finally:
+                await resp.dispose()
+            if not (300 <= status < 400) or not loc:
+                break
+            cur = urljoin(cur, loc)
+            hops += 1
+        return {"url": cur, "hops": hops, "status": status}
+
     async def file_chooser(self, index: int, files: list, *, names: list | None = None,
                            mimes: list | None = None, timeout_ms: int = 15_000) -> dict:
         """Click ``index`` WHILE expecting a file-chooser popup, then provide
@@ -509,6 +542,9 @@ class HumanBrowser:
         if action == "fetch":
             return await self.fetch(kw["url"], headers=kw.get("headers"),
                                     timeout_ms=int(kw.get("timeout_ms", 30_000)))
+        if action == "resolve_url":
+            return await self.resolve_url(kw["url"], max_hops=int(kw.get("max_hops", 5)),
+                                          timeout_ms=int(kw.get("timeout_ms", 15_000)))
         if action == "file_chooser":
             return await self.file_chooser(int(kw["index"]), list(kw.get("files") or []),
                                            names=list(kw.get("names") or []),

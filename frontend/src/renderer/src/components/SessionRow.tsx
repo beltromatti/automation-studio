@@ -6,7 +6,8 @@ import type { AgentSession } from "@/lib/types";
 const STATUS_COLOR: Record<string, string> = {
   starting: "#3b9eff", queued: "#9aa0a6", running: "#3b9eff",
   waiting: "#f5a623", scheduled: "#9b8cff",
-  done: "#2bd576", failed: "#ff5c5c", canceled: "#6e6e6e",
+  done: "#2bd576", failed: "#ff5c5c", stopped: "#6e6e6e",
+  canceled: "#6e6e6e",  // legacy name for "stopped"
 };
 
 export function SessionPill({ status }: { status: string }) {
@@ -29,7 +30,7 @@ export function SessionRow({ session: s }: { session: AgentSession }) {
       <div className="min-w-0 flex-1">
         <div className="text-[13px] font-medium truncate">
           {s.agentName}
-          <span className="text-muted font-normal"> · {s.engine}</span>
+          <span className="text-muted font-normal"> · {s.engine}{s.model ? ` · ${s.model}` : ""}</span>
         </div>
         <div className="text-[11px] text-faint mono truncate">
           {s.prompt || "—"}

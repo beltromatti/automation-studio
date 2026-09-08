@@ -533,6 +533,33 @@ def create_app() -> FastAPI:
         from .agents import engine_status
         return {"engines": engine_status()}
 
+    @app.get("/api/agents/models")
+    async def agent_models(engine: str = "", refresh: int = 0):
+        """The model + reasoning-effort catalogue, asked of the INSTALLED CLIs
+        (never hardcoded here). Cached; `refresh=1` re-probes."""
+        from . import engines as eng
+        try:
+            if engine:
+                return {"catalog": await eng.catalog_async(engine, bool(refresh))}
+            return {"catalogs": await eng.catalogs_async(bool(refresh))}
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    @app.post("/api/agents/sessions/{sid}/model")
+    async def agent_set_model(sid: str, body: dict = Body(...)):
+        """Change model / reasoning effort mid-conversation (native thread kept)."""
+        from . import engines as eng
+        from .agents import get_agents
+        # warm the catalogue off the loop so set_model's validation is a dict lookup
+        s = get_agents().get_session(sid)
+        if s:
+            try:
+                await eng.catalog_async(s["engine"])
+            except Exception:
+                pass
+        res = get_agents().set_model(sid, body.get("model"), body.get("effort"))
+        return JSONResponse(res, status_code=200 if res.get("ok") else 400)
+
     @app.get("/api/system/deps")
     async def system_deps():
         """Status + install guidance for every external dependency (agent engines +
@@ -553,7 +580,8 @@ def create_app() -> FastAPI:
             s = get_agents().launch(body["agentId"], body.get("profileId") or "ephemeral",
                                     body.get("prompt", ""), bool(body.get("watch")),
                                     body.get("engine") or "codex", start_at=_resolve_at(body),
-                                    file_ids=body.get("files") or None)
+                                    file_ids=body.get("files") or None,
+                                    model=body.get("model"), effort=body.get("effort"))
             return {"session": get_agents().get_session(s.id)}
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=400)

@@ -79,6 +79,8 @@ Four specialists ship built-in:
 
 Roll your own in seconds: give an agent a name, a personality/skill prompt, and a toolset — it's ready to launch.
 
+**Pick the model, mid-conversation.** Every session has a model and a reasoning-effort dropdown, and the choices are read live from the CLI you have installed — `codex app-server model/list` and Claude Code's own `/model`, so a new model shows up the day your CLI learns about it, with nothing to update here. Switch either one mid-chat and the conversation carries on in the same native thread, exactly like typing `/model` in the CLI itself.
+
 ---
 
 ## ⬇️ Download

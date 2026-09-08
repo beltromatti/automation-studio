@@ -1,9 +1,22 @@
 import { app, BrowserWindow, shell, Menu, Tray, nativeImage } from "electron";
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, ChildProcess, spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import net from "node:net";
 import http from "node:http";
+
+// ELECTRON_RUN_AS_NODE makes the Electron binary boot as plain Node — `app` is
+// then undefined and the app dies before it can say why. Editors and CI shells
+// (VS Code's integrated terminal among them) export it, and Electron reads it
+// before any of our code runs, so unsetting it here is too late: re-launch
+// ourselves once with a clean environment and let this process go. Guarded by a
+// marker so a failure can never turn into a spawn loop.
+if (process.env.ELECTRON_RUN_AS_NODE && !process.env.AUTOMATION_STUDIO_RELAUNCHED) {
+  const env: NodeJS.ProcessEnv = { ...process.env, AUTOMATION_STUDIO_RELAUNCHED: "1" };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const r = spawnSync(process.execPath, process.argv.slice(1), { stdio: "inherit", env });
+  process.exit(r.status ?? 0);
+}
 
 const isMac = process.platform === "darwin";
 
@@ -25,19 +38,53 @@ function freePort(): Promise<number> {
   });
 }
 
+// Poll the backend until it answers, or give up after `timeoutMs`.
+//
+// This MUST always settle. An earlier version destroyed a slow request with a
+// bare `req.destroy()`, which emits `close` but no `error` on current Node — so
+// the retry was never scheduled, the promise hung forever, and the app sat there
+// with a started backend and NO WINDOW AT ALL. Every path is now funnelled
+// through one settle-once pair, plus a hard overall timer as a backstop.
 function waitForHealth(url: string, timeoutMs = 30000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve) => {
-    const tick = () => {
-      const req = http.get(url + "/api/health", (r) => {
-        r.resume();
-        if (r.statusCode === 200) return resolve(true);
-        retry();
-      });
-      req.on("error", retry);
-      req.setTimeout(1000, () => req.destroy());
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(hardStop);
+      resolve(ok);
     };
-    const retry = () => (Date.now() > deadline ? resolve(false) : setTimeout(tick, 400));
+    const hardStop = setTimeout(() => finish(false), timeoutMs + 2000);
+
+    const tick = () => {
+      if (settled) return;
+      let attemptOver = false;
+      const again = () => {
+        if (attemptOver || settled) return;
+        attemptOver = true;
+        if (Date.now() > deadline) finish(false);
+        else setTimeout(tick, 400);
+      };
+      let req: http.ClientRequest;
+      try {
+        req = http.get(url + "/api/health", (r) => {
+          r.resume();
+          if (r.statusCode === 200) {
+            attemptOver = true;
+            finish(true);
+          } else {
+            again();
+          }
+        });
+      } catch {
+        again();
+        return;
+      }
+      req.on("error", again);
+      req.on("close", again);   // covers a destroyed request that emits no error
+      req.setTimeout(1500, () => req.destroy());
+    };
     tick();
   });
 }
@@ -157,7 +204,20 @@ async function createWindow() {
     },
   });
 
-  mainWindow.once("ready-to-show", () => mainWindow?.show());
+  // Show on the first paint, but never depend on it alone: if the renderer fails
+  // to paint (a bad asset, a CSP refusal, a renderer crash) `ready-to-show` never
+  // fires and a `show: false` window would leave the user staring at nothing.
+  // did-finish-load and a last-resort timer both reveal it.
+  const reveal = () => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) mainWindow.show();
+  };
+  mainWindow.once("ready-to-show", reveal);
+  mainWindow.webContents.once("did-finish-load", reveal);
+  mainWindow.webContents.on("did-fail-load", (_e, code, desc, validated) =>
+    console.error("[main] renderer failed to load:", code, desc, validated));
+  mainWindow.webContents.on("render-process-gone", (_e, details) =>
+    console.error("[main] renderer process gone:", details.reason));
+  setTimeout(reveal, 8000);
 
   // Closing the window does NOT quit: hide to the background (the backend and any
   // runs keep going) and leave the tray/dock as the running indicator. The app
