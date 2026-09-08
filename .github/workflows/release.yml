@@ -165,13 +165,18 @@ jobs:
         shell: bash
         run: |
           BIN=backend/dist/automation-backend/automation-backend
-          [ "${{ runner.os }}" = "Windows" ] && BIN="backend/dist/automation-backend/automation-backend.exe"
+          if [ "${{ runner.os }}" = "Windows" ]; then BIN="$BIN.exe"; fi
           AUTOMATION_DATA_DIR="$RUNNER_TEMP/smoke-data" "$BIN" api --port 8799 &
+          PID=$!
+          OK=0
           for i in $(seq 1 40); do
-            if curl -sf http://127.0.0.1:8799/api/health; then echo; echo "frozen backend OK"; exit 0; fi
+            if curl -sf http://127.0.0.1:8799/api/health; then echo; OK=1; break; fi
             sleep 1
           done
-          echo "frozen backend never became healthy"; exit 1
+          kill "$PID" 2>/dev/null || true
+          if [ "$OK" = "1" ]; then echo "frozen backend OK"; else
+            echo "frozen backend never became healthy"; exit 1
+          fi
 
       # ── Chromium ───────────────────────────────────────────────────────────
       - name: Stage Chromium for this platform/arch
