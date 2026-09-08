@@ -435,7 +435,13 @@ def resolve(engine: str, model: str | None, effort: str | None) -> tuple[str, st
     try:
         cat = catalog(engine)
     except Exception:
-        return (model or "", effort or "")
+        return (model or "").strip(), (effort or "").strip()
+    if cat.get("source") == "seed":
+        # We could not read the real list, so we have no authority to correct the
+        # caller — and substituting a name from our fallback seed risks pinning a
+        # model the CLI has since retired. Pass through verbatim; an empty value
+        # means the flag is omitted entirely and the CLI uses its own default.
+        return (model or "").strip(), (effort or "").strip()
     models = cat.get("models") or []
     by_id = {m["id"]: m for m in models}
     mid = (model or "").strip()

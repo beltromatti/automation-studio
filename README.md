@@ -94,7 +94,7 @@ Grab the installer for your OS from the **[latest release](https://github.com/be
 | 🪟 Windows | `Automation Studio-<version>.exe` |
 | 🐧 Linux | `Automation Studio-<version>.AppImage` |
 
-<sub>First launch: builds are ad-hoc / self-signed, so on macOS **right-click → Open** once, and on Windows click **More info → Run anyway**.</sub>
+<sub>macOS builds are Developer ID signed and notarized by Apple — they open normally. Windows builds are unsigned, so on first launch click **More info → Run anyway**.</sub>
 
 ---
 
