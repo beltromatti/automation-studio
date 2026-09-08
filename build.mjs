@@ -268,9 +268,10 @@ function withTransientVersion(version, fn) {
   const original = readFileSync(frontendPkg, 'utf8')
   const parsed = JSON.parse(original)
   if (parsed.version === version) return fn()
+  const was = parsed.version
   parsed.version = version
   writeFileSync(frontendPkg, `${JSON.stringify(parsed, null, 2)}\n`)
-  console.log(`==> frontend/package.json: ${parsed.version} → ${version} (transient)`)
+  console.log(`==> frontend/package.json: ${was} → ${version} (transient)`)
   try {
     return fn()
   } finally {

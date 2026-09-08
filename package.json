@@ -1,7 +1,7 @@
 {
   "name": "automation-studio",
   "private": true,
-  "version": "1.5.3",
+  "version": "0.0.0",
   "description": "Automation Studio \u2014 the Electron desktop app shell (frontend/) that wraps the autonomous Python automation engine (backend/). This root is the canonical entrypoint; the engine in backend/ also runs standalone (pip install -e ./backend).",
   "author": "beltromatti",
   "scripts": {

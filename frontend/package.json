@@ -1,7 +1,7 @@
 {
   "name": "automation-studio",
-  "version": "1.5.3",
-  "description": "Automation Studio \u2014 local desktop console for human-grade automations",
+  "version": "0.0.0",
+  "description": "Automation Studio — local desktop console for human-grade automations",
   "main": "./out/main/index.js",
   "author": "beltromatti",
   "scripts": {
