@@ -293,7 +293,11 @@ def _claude_efforts(binary: str) -> list[str]:
 def _claude_models(binary: str) -> tuple[list[str], str]:
     """Ask Claude Code itself: `/model` prints the current model and every alias
     it accepts. Runs as a local slash command — no tokens, no API call."""
-    code, out, err = _run([binary, "-p", "/model", "--output-format", "json"])
+    # --no-session-persistence: this is a metadata question, not a conversation.
+    # Without it every probe would leave a stray empty session in the user's own
+    # Claude Code /resume picker.
+    code, out, err = _run([binary, "-p", "/model", "--output-format", "json",
+                           "--no-session-persistence"])
     text = ""
     try:
         obj = json.loads(out)
